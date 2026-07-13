@@ -60,10 +60,7 @@ async fn main() -> io::Result<()> {
             // Safe port stripping handled before calling packet crafter
             let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
 
-            println!(
-                "[REDIRECT] {} -> {}",
-                domain, ip
-            );
+            println!("[REDIRECT] {} -> {}", domain, ip);
             if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
                 let _ = server_socket.send_to(&resp, src_addr).await;
             }
@@ -71,7 +68,7 @@ async fn main() -> io::Result<()> {
         }
 
         let resolver = resolver_picker.pick();
-        match resolve_from_upstream(payload, &upstream_socket, resolver).await {
+        match resolve_from_upstream(payload, &upstream_socket, resolver, src_addr).await {
             Ok((reply_buf, reply_len)) => {
                 let _ = server_socket
                     .send_to(&reply_buf[..reply_len], src_addr)
@@ -89,26 +86,29 @@ async fn resolve_from_upstream(
     payload: &[u8],
     upstream_socket: &UdpSocket,
     upstream_resolver: &str,
+    src_addr: SocketAddr
 ) -> io::Result<(Vec<u8>, usize)> {
-    let upstream_addr: SocketAddr = upstream_resolver
+    let upstream_addr: std::net::SocketAddr = upstream_resolver
         .parse()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-    // Forward the exact binary payload to DNS server
+    // If inject_ecs_option returns None (IPv6), we unwrap_or fallback to the original payload
+    let final_payload = inject_ecs_option(payload, src_addr).unwrap_or_else(|| payload.to_vec());
+
     if upstream_socket
-        .send_to(payload, upstream_addr)
+        .send_to(&final_payload, upstream_addr)
         .await
         .is_ok()
     {
-        let mut reply_buf = [0u8; 1024];
+        let mut reply_buf = [0u8; 4096];
         if let Ok((reply_len, _)) = upstream_socket.recv_from(&mut reply_buf).await {
             return Ok((reply_buf[..reply_len].to_vec(), reply_len));
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "could not resolve domain",
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "could not resolve domain upstream",
     ))
 }
 
@@ -201,6 +201,55 @@ fn craft_nxdomain_response(payload: &[u8]) -> Option<Vec<u8>> {
     Some(resp)
 }
 
+#[inline]
+fn inject_ecs_option(payload: &[u8], client_addr: std::net::SocketAddr) -> Option<Vec<u8>> {
+    let ip_bytes = match client_addr.ip() {
+        std::net::IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            if octets[0] == 127 {
+                [8, 8, 8, 8]
+            } else {
+                octets
+            }
+        }
+        std::net::IpAddr::V6(_) => return None,
+    };
+
+    let mut modified = payload.to_vec();
+    if modified.len() < 12 {
+        return Some(modified);
+    }
+
+    let arcount = ((modified[10] as u16) << 8) | (modified[11] as u16);
+    let new_arcount = arcount + 1;
+    modified[10] = (new_arcount >> 8) as u8;
+    modified[11] = (new_arcount & 0xFF) as u8;
+
+    let mut opt_rr = Vec::new();
+
+    opt_rr.push(0x00);
+    opt_rr.extend_from_slice(&[0x00, 0x29]);
+    opt_rr.extend_from_slice(&[0x10, 0x00]);
+    opt_rr.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+    let rd_length: u16 = 2 + 2 + 2 + 1 + 1 + 3;
+    opt_rr.extend_from_slice(&rd_length.to_be_bytes());
+
+    opt_rr.extend_from_slice(&[0x00, 0x08]);
+
+    let option_data_len: u16 = 2 + 1 + 1 + 3;
+    opt_rr.extend_from_slice(&option_data_len.to_be_bytes());
+
+    opt_rr.extend_from_slice(&[0x00, 0x01]);
+    opt_rr.push(24);
+    opt_rr.push(0);
+
+    opt_rr.extend_from_slice(&ip_bytes[0..3]);
+
+    modified.extend_from_slice(&opt_rr);
+    Some(modified)
+}
+
 #[derive(Default, Deserialize)]
 struct Conf {
     drop_list: Vec<String>,
@@ -238,7 +287,6 @@ fn load_conf() -> io::Result<Conf> {
 
 #[derive(Clone)]
 pub struct ResolverPicker {
-    // Stores the healthy resolvers sorted by lowest latency first
     healthy_resolvers: Arc<Vec<String>>,
 }
 
@@ -246,7 +294,6 @@ impl ResolverPicker {
     pub async fn new(resolvers: Vec<String>) -> io::Result<Self> {
         let mut tasks = Vec::new();
 
-        // 1. Benchmark all resolvers concurrently
         for resolver in resolvers {
             tasks.push(tokio::spawn(async move {
                 match Self::measure_latency(&resolver).await {
@@ -263,7 +310,6 @@ impl ResolverPicker {
             }
         }
 
-        // 2. Fallback error check
         if results.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -271,10 +317,8 @@ impl ResolverPicker {
             ));
         }
 
-        // 3. Sort by latency (lowest duration first)
         results.sort_by_key(|&(_, latency)| latency);
 
-        // 4. Extract sorted resolver strings
         let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
 
         println!(
@@ -287,14 +331,11 @@ impl ResolverPicker {
         })
     }
 
-    /// Returns the fastest available resolver string reference.
     pub fn pick(&self) -> &str {
         // Since they are sorted, index 0 is always the fastest
         &self.healthy_resolvers[0]
     }
 
-    /// Sends a lightweight standard DNS query payload for 'google.com'
-    /// to determine if a server is online and track its round-trip time.
     async fn measure_latency(resolver: &str) -> io::Result<Duration> {
         let addr: SocketAddr = resolver
             .parse()
@@ -302,7 +343,6 @@ impl ResolverPicker {
 
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
-        // A minimal, hardcoded raw binary DNS query packet for 'google.com' (A record)
         let dns_probe_packet: &[u8] = &[
             0xAA, 0xBB, // Transaction ID
             0x01, 0x00, // Flags: Standard Query
@@ -321,7 +361,6 @@ impl ResolverPicker {
         socket.send_to(dns_probe_packet, addr).await?;
 
         let mut buf = [0u8; 512];
-        // Enforce a strict 1.5-second timeout so slow/dead resolvers drop quickly
         let _ = timeout(Duration::from_millis(1500), socket.recv_from(&mut buf)).await??;
 
         let latency = start.elapsed();
@@ -339,7 +378,6 @@ fn matches_domain_pattern(domain: &str, pattern: &str) -> bool {
     }
 
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        // Matches "example.com" directly or any subdomain like "://example.com"
         return domain == suffix || domain.ends_with(&format!(".{}", suffix));
     }
 
