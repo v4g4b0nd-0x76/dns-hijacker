@@ -1,15 +1,17 @@
 use serde::Deserialize;
-use std::{io, net::SocketAddr};
-use tokio::net::UdpSocket;
+use std::{io, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
+use tokio::{net::UdpSocket, time::timeout};
 
 const LOCAL_DNS: &str = "0.0.0.0:553";
-const UPSTREAM_RESOLVER: &str = "8.8.8.8:53";
 const PAYLOAD_BUF_SIZE: usize = 1024;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> io::Result<()> {
-    let domain_list = load_domain_list()?;
+    let conf = load_conf()?;
+    let resolver_picker = ResolverPicker::new(conf.resolvers).await?;
     let server_socket = UdpSocket::bind(LOCAL_DNS).await?;
+    let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?; // todo: recheck the connection each x second
+
     println!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
@@ -31,7 +33,7 @@ async fn main() -> io::Result<()> {
             None => continue,
         };
         println!("Resolving {}", domain);
-        if domain_list.drop_list.contains(&domain) {
+        if conf.drop_list.contains(&domain) {
             // drop dns request
             println!("[Dropped] {}", domain);
             if let Some(resp) = craft_nxdomain_response(payload) {
@@ -40,7 +42,7 @@ async fn main() -> io::Result<()> {
             continue;
         }
 
-        if let Some((_, ip)) = domain_list.redirect_list.iter().find(|(d, _)| d == &domain) {
+        if let Some((_, ip)) = conf.redirect_list.iter().find(|(d, _)| d == &domain) {
             println!("[REDIRECT] {} -> {}", domain, ip);
             if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
                 let _ = server_socket.send_to(&resp, src_addr).await;
@@ -48,14 +50,17 @@ async fn main() -> io::Result<()> {
             continue;
         }
 
-        match resolve_from_upstream(payload, UPSTREAM_RESOLVER).await {
+        let resolver = resolver_picker.pick();
+        match resolve_from_upstream(payload, &upstream_socket,resolver ).await {
             Ok((reply_buf, reply_len)) => {
-                let _ = server_socket.send_to(&reply_buf[..reply_len], src_addr).await;
+                let _ = server_socket
+                    .send_to(&reply_buf[..reply_len], src_addr)
+                    .await;
             }
             Err(err) => {
                 eprintln!(
                     "failed to resolve {} from {}: {}",
-                    domain, UPSTREAM_RESOLVER, err
+                    domain, resolver, err
                 );
                 continue;
             }
@@ -65,11 +70,9 @@ async fn main() -> io::Result<()> {
 
 async fn resolve_from_upstream(
     payload: &[u8],
+    upstream_socket: &UdpSocket,
     upstream_resolver: &str,
 ) -> io::Result<(Vec<u8>, usize)> {
-    // TODO: optimization - pass a shared UdpSocket or connection pool as an argument instead of binding here
-    let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?;
-
     let upstream_addr: SocketAddr = upstream_resolver
         .parse()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
@@ -82,12 +85,10 @@ async fn resolve_from_upstream(
     {
         let mut reply_buf = [0u8; 1024];
         if let Ok((reply_len, _)) = upstream_socket.recv_from(&mut reply_buf).await {
-            // FIX: Slice the buffer using reply_len so you don't return trailing zeros
             return Ok((reply_buf[..reply_len].to_vec(), reply_len));
         }
     }
 
-    // FIX: Wrap the error in the Err variant
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "could not resolve domain",
@@ -184,10 +185,11 @@ fn craft_nxdomain_response(payload: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[derive(Default, Deserialize)]
-struct DomainList {
+struct Conf {
     drop_list: Vec<String>,
     #[serde(deserialize_with = "deserialize_redirect_list")]
     redirect_list: Vec<(String, String)>,
+    resolvers: Vec<String>,
 }
 
 fn deserialize_redirect_list<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
@@ -211,8 +213,98 @@ where
         .collect()
 }
 
-fn load_domain_list() -> io::Result<DomainList> {
-    let content = std::fs::read_to_string("list.toml")?;
+fn load_conf() -> io::Result<Conf> {
+    let content = std::fs::read_to_string("conf.toml")?;
 
     toml::from_str(&content).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+#[derive(Clone)]
+pub struct ResolverPicker {
+    // Stores the healthy resolvers sorted by lowest latency first
+    healthy_resolvers: Arc<Vec<String>>,
+}
+
+impl ResolverPicker {
+    pub async fn new(resolvers: Vec<String>) -> io::Result<Self> {
+        let mut tasks = Vec::new();
+
+        // 1. Benchmark all resolvers concurrently
+        for resolver in resolvers {
+            tasks.push(tokio::spawn(async move {
+                match Self::measure_latency(&resolver).await {
+                    Ok(latency) => Some((resolver, latency)),
+                    Err(_) => None,
+                }
+            }));
+        }
+
+        let mut results = Vec::new();
+        for task in tasks {
+            if let Ok(Some((resolver, latency))) = task.await {
+                results.push((resolver, latency));
+            }
+        }
+
+        // 2. Fallback error check
+        if results.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "All provided DNS upstream resolvers are unhealthy or unreachable",
+            ));
+        }
+
+        // 3. Sort by latency (lowest duration first)
+        results.sort_by_key(|&(_, latency)| latency);
+
+        // 4. Extract sorted resolver strings
+        let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
+        
+        println!("[PICKER] Healthy upstreams discovered: {:?}", sorted_resolvers);
+
+        Ok(Self {
+            healthy_resolvers: Arc::new(sorted_resolvers),
+        })
+    }
+
+    /// Returns the fastest available resolver string reference.
+    pub fn pick(&self) -> &str {
+        // Since they are sorted, index 0 is always the fastest
+        &self.healthy_resolvers[0]
+    }
+
+    /// Sends a lightweight standard DNS query payload for 'google.com' 
+    /// to determine if a server is online and track its round-trip time.
+    async fn measure_latency(resolver: &str) -> io::Result<Duration> {
+        let addr: SocketAddr = resolver
+            .parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        
+        // A minimal, hardcoded raw binary DNS query packet for 'google.com' (A record)
+        let dns_probe_packet: &[u8] = &[
+            0xAA, 0xBB, // Transaction ID
+            0x01, 0x00, // Flags: Standard Query
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answer RRs: 0
+            0x00, 0x00, // Authority RRs: 0
+            0x00, 0x00, // Additional RRs: 0
+            0x06, b'g', b'o', b'o', b'g', b'l', b'e', // Label: google
+            0x03, b'c', b'o', b'm',                  // Label: com
+            0x00,                                     // Null terminator
+            0x00, 0x01,                               // Type: A
+            0x00, 0x01,                               // Class: IN
+        ];
+
+        let start = Instant::now();
+        socket.send_to(dns_probe_packet, addr).await?;
+
+        let mut buf = [0u8; 512];
+        // Enforce a strict 1.5-second timeout so slow/dead resolvers drop quickly
+        let _ = timeout(Duration::from_millis(1500), socket.recv_from(&mut buf)).await??;
+        
+        let latency = start.elapsed();
+        Ok(latency)
+    }
 }
