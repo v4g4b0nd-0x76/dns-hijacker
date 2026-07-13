@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd service for Apple Silicon (M1/M2/M3/M4).
+  Install (as root, required for UDP/53):
+    sudo mkdir -p /opt/dns-hijacker
+    sudo cp target/aarch64-apple-darwin/release/dns-hijacker /opt/dns-hijacker/
+    sudo cp conf.toml /opt/dns-hijacker/
+    sudo cp assets/com.dns-hijacker.plist /Library/LaunchDaemons/
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.dns-hijacker.plist
+    sudo launchctl enable system/com.dns-hijacker
+    sudo launchctl kickstart -k system/com.dns-hijacker
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dns-hijacker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/dns-hijacker/dns-hijacker</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/opt/dns-hijacker</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/log/dns-hijacker.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/dns-hijacker.err.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<!-- Port 53 requires root on macOS; run the LaunchDaemon as root. -->
+	<key>UserName</key>
+	<string>root</string>
+</dict>
+</plist>

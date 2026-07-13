@@ -4,9 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive", "rc"] }
-tokio = { version = "1.52.3", features = ["full"] }
-toml = "1.1.2"
-reqwest = { version = "0.12", features= ["native-tls","rustls-tls",], default-features = false }
-openssl = { version = "0.10.35", features = ["vendored"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+tokio = { version = "1.52.3", default-features = false, features = [
+    "rt",
+    "macros",
+    "net",
+    "sync",
+    "time",
+] }
+toml = { version = "1.1.2", default-features = false, features = ["parse", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+[profile.release]
+# Size-first release build; LTO still inlines across crates for hot paths.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = false
+
+[profile.release-perf]
+inherits = "release"
+# Prefer speed/inlining over minimal size when needed.
+opt-level = 3

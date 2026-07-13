@@ -1,0 +1,46 @@
+[Unit]
+Description=DNS Hijacker local resolver
+Documentation=file:///opt/dns-hijacker/assets/SERVICES.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dns-hijacker
+Group=dns-hijacker
+WorkingDirectory=/opt/dns-hijacker
+ExecStart=/opt/dns-hijacker/dns-hijacker
+Restart=on-failure
+RestartSec=2
+# conf.toml is read from WorkingDirectory
+Environment=RUST_LOG=warn
+
+# Bind TCP/UDP privileged ports (53) without full root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/dns-hijacker
+# Allow reading config; no write needed at runtime.
+ProtectHostname=true
+
+# Resource limits (tune if needed)
+LimitNOFILE=65535
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
