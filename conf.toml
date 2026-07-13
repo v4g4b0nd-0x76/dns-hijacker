@@ -1,10 +1,10 @@
 drop_list = [
     "google.com",
-    "example.com",
+    "*.example.com",
 ]
 
 redirect_list = [
-    "test.com:192.168.1.1",
+    "*.test.com:192.168.1.1",
 ]
 
 resolvers = [
