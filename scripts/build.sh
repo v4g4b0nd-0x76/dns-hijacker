@@ -22,9 +22,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Size-oriented flags; LTO/codegen are also set in Cargo.toml [profile.release].
-# inline-threshold keeps hot #[inline(always)] paths aggressive under opt-level=z.
+# LLVM inline-threshold keeps hot #[inline(always)] paths aggressive under opt-level=z.
 export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-z}"
-BASE_RUSTFLAGS="${RUSTFLAGS:-} -C inline-threshold=275 -C strip=symbols"
+BASE_RUSTFLAGS="${RUSTFLAGS:-} -C llvm-args=--inline-threshold=275 -C strip=symbols"
 export RUSTFLAGS="$BASE_RUSTFLAGS"
 
 need_target() {
