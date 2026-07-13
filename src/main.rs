@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::{
+    fmt,
     io,
     net::SocketAddr,
     sync::Arc,
@@ -9,11 +10,109 @@ use tokio::{net::UdpSocket, time::timeout};
 
 const LOCAL_DNS: &str = "0.0.0.0:553";
 const PAYLOAD_BUF_SIZE: usize = 1024;
+const DOH_TIMEOUT: Duration = Duration::from_secs(5);
+const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Minimal DNS query for `google.com` A record, used as a health-check probe.
+const DNS_PROBE_PACKET: &[u8] = &[
+    0xAA, 0xBB, // Transaction ID
+    0x01, 0x00, // Flags: Standard Query
+    0x00, 0x01, // Questions: 1
+    0x00, 0x00, // Answer RRs: 0
+    0x00, 0x00, // Authority RRs: 0
+    0x00, 0x00, // Additional RRs: 0
+    0x06, b'g', b'o', b'o', b'g', b'l', b'e', // Label: google
+    0x03, b'c', b'o', b'm', // Label: com
+    0x00, // Null terminator
+    0x00, 0x01, // Type: A
+    0x00, 0x01, // Class: IN
+];
+
+#[derive(Debug)]
+enum Error {
+    Io(io::Error),
+    Config(String),
+    InvalidResolver(String),
+    Doh(DohError),
+    UdpTimeout,
+    UpstreamUnreachable,
+    NoHealthyResolvers,
+}
+
+#[derive(Debug)]
+enum DohError {
+    Timeout,
+    Request(reqwest::Error),
+    Status(reqwest::StatusCode),
+    Body(reqwest::Error),
+}
+
+impl fmt::Display for DohError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => write!(f, "DoH request timed out"),
+            Self::Request(err) => write!(f, "DoH request failed: {err}"),
+            Self::Status(status) => write!(f, "DoH upstream returned status {status}"),
+            Self::Body(err) => write!(f, "failed to read DoH response body: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for DohError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Request(err) | Self::Body(err) => Some(err),
+            Self::Timeout | Self::Status(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "{err}"),
+            Self::Config(msg) => write!(f, "config error: {msg}"),
+            Self::InvalidResolver(resolver) => write!(f, "invalid resolver address: {resolver}"),
+            Self::Doh(err) => write!(f, "{err}"),
+            Self::UdpTimeout => write!(f, "UDP request timed out"),
+            Self::UpstreamUnreachable => write!(f, "could not resolve domain upstream"),
+            Self::NoHealthyResolvers => {
+                write!(
+                    f,
+                    "all provided DNS upstream resolvers are unhealthy or unreachable"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Doh(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<DohError> for Error {
+    fn from(err: DohError) -> Self {
+        Self::Doh(err)
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), Error> {
     let conf = load_conf()?;
-    let resolver_picker = ResolverPicker::new(conf.resolvers).await?;
+    let http = build_http_client()?;
+    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
     let server_socket = UdpSocket::bind(LOCAL_DNS).await?;
     let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?; // todo: recheck the connection each x second
 
@@ -68,7 +167,7 @@ async fn main() -> io::Result<()> {
         }
 
         let resolver = resolver_picker.pick();
-        match resolve_from_upstream(payload, &upstream_socket, resolver, src_addr).await {
+        match resolve_from_upstream(payload, &upstream_socket, resolver, src_addr, &http).await {
             Ok((reply_buf, reply_len)) => {
                 let _ = server_socket
                     .send_to(&reply_buf[..reply_len], src_addr)
@@ -82,18 +181,34 @@ async fn main() -> io::Result<()> {
     }
 }
 
+fn build_http_client() -> Result<reqwest::Client, Error> {
+    reqwest::Client::builder()
+        .timeout(DOH_TIMEOUT)
+        .connect_timeout(Duration::from_secs(2))
+        // DoH endpoints must be hit directly; following HTML redirects hides bad URLs.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| Error::Config(format!("failed to build HTTP client: {err}")))
+}
+
 async fn resolve_from_upstream(
     payload: &[u8],
     upstream_socket: &UdpSocket,
     upstream_resolver: &str,
-    src_addr: SocketAddr
-) -> io::Result<(Vec<u8>, usize)> {
-    let upstream_addr: std::net::SocketAddr = upstream_resolver
-        .parse()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-
-    // If inject_ecs_option returns None (IPv6), we unwrap_or fallback to the original payload
+    src_addr: SocketAddr,
+    http: &reqwest::Client,
+) -> Result<(Vec<u8>, usize), Error> {
+    // If inject_ecs_option returns None (IPv6), fall back to the original payload.
     let final_payload = inject_ecs_option(payload, src_addr).unwrap_or_else(|| payload.to_vec());
+
+    // DoH URLs are not socket addresses — check this before parsing.
+    if upstream_resolver.starts_with("https://") {
+        return resolve_via_doh(http, upstream_resolver, &final_payload).await;
+    }
+
+    let upstream_addr: SocketAddr = upstream_resolver
+        .parse()
+        .map_err(|_| Error::InvalidResolver(upstream_resolver.to_owned()))?;
 
     if upstream_socket
         .send_to(&final_payload, upstream_addr)
@@ -106,10 +221,30 @@ async fn resolve_from_upstream(
         }
     }
 
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "could not resolve domain upstream",
-    ))
+    Err(Error::UpstreamUnreachable)
+}
+
+async fn resolve_via_doh(
+    http: &reqwest::Client,
+    url: &str,
+    payload: &[u8],
+) -> Result<(Vec<u8>, usize), Error> {
+    let response = http
+        .post(url)
+        .header("content-type", "application/dns-message")
+        .header("accept", "application/dns-message")
+        .body(payload.to_vec())
+        .send()
+        .await
+        .map_err(DohError::Request)?;
+
+    if !response.status().is_success() {
+        return Err(DohError::Status(response.status()).into());
+    }
+
+    let body_bytes = response.bytes().await.map_err(DohError::Body)?;
+    let reply_len = body_bytes.len();
+    Ok((body_bytes.to_vec(), reply_len))
 }
 
 #[inline]
@@ -279,26 +414,32 @@ where
         .collect()
 }
 
-fn load_conf() -> io::Result<Conf> {
+fn load_conf() -> Result<Conf, Error> {
     let content = std::fs::read_to_string("conf.toml")?;
-
-    toml::from_str(&content).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    toml::from_str(&content).map_err(|err| Error::Config(err.to_string()))
 }
 
 #[derive(Clone)]
-pub struct ResolverPicker {
+struct ResolverPicker {
     healthy_resolvers: Arc<Vec<String>>,
 }
 
 impl ResolverPicker {
-    pub async fn new(resolvers: Vec<String>) -> io::Result<Self> {
+    async fn new(resolvers: Vec<String>, http: reqwest::Client) -> Result<Self, Error> {
         let mut tasks = Vec::new();
 
         for resolver in resolvers {
+            let http = http.clone();
             tasks.push(tokio::spawn(async move {
-                match Self::measure_latency(&resolver).await {
-                    Ok(latency) => Some((resolver, latency)),
-                    Err(_) => None,
+                match Self::measure_latency(&resolver, &http).await {
+                    Ok(latency) => {
+                        println!("[PICKER LOG] {} responded in {:?}", resolver, latency);
+                        Some((resolver, latency))
+                    }
+                    Err(e) => {
+                        eprintln!("[PICKER WARN] {} failed health check: {}", resolver, e);
+                        None
+                    }
                 }
             }));
         }
@@ -311,18 +452,16 @@ impl ResolverPicker {
         }
 
         if results.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "All provided DNS upstream resolvers are unhealthy or unreachable",
-            ));
+            return Err(Error::NoHealthyResolvers);
         }
 
+        // Sort by latency (lowest duration first)
         results.sort_by_key(|&(_, latency)| latency);
 
         let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
 
         println!(
-            "[PICKER] Healthy upstreams discovered: {:?}",
+            "[PICKER] Healthy upstreams discovered and sorted: {:?}",
             sorted_resolvers
         );
 
@@ -331,40 +470,49 @@ impl ResolverPicker {
         })
     }
 
-    pub fn pick(&self) -> &str {
-        // Since they are sorted, index 0 is always the fastest
+    fn pick(&self) -> &str {
         &self.healthy_resolvers[0]
     }
 
-    async fn measure_latency(resolver: &str) -> io::Result<Duration> {
+    async fn measure_latency(resolver: &str, http: &reqwest::Client) -> Result<Duration, Error> {
+        let start = Instant::now();
+
+        if resolver.starts_with("https://") {
+            let req_future = http
+                .post(resolver)
+                .header("content-type", "application/dns-message")
+                .header("accept", "application/dns-message")
+                .body(DNS_PROBE_PACKET.to_vec())
+                .send();
+
+            let response = match timeout(DOH_TIMEOUT, req_future).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(err)) => return Err(DohError::Request(err).into()),
+                Err(_) => return Err(DohError::Timeout.into()),
+            };
+
+            if !response.status().is_success() {
+                return Err(DohError::Status(response.status()).into());
+            }
+
+            // Drain the body so the full round-trip is measured.
+            let _ = response.bytes().await.map_err(DohError::Body)?;
+            return Ok(start.elapsed());
+        }
+
         let addr: SocketAddr = resolver
             .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            .map_err(|_| Error::InvalidResolver(resolver.to_owned()))?;
 
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
-
-        let dns_probe_packet: &[u8] = &[
-            0xAA, 0xBB, // Transaction ID
-            0x01, 0x00, // Flags: Standard Query
-            0x00, 0x01, // Questions: 1
-            0x00, 0x00, // Answer RRs: 0
-            0x00, 0x00, // Authority RRs: 0
-            0x00, 0x00, // Additional RRs: 0
-            0x06, b'g', b'o', b'o', b'g', b'l', b'e', // Label: google
-            0x03, b'c', b'o', b'm', // Label: com
-            0x00, // Null terminator
-            0x00, 0x01, // Type: A
-            0x00, 0x01, // Class: IN
-        ];
-
-        let start = Instant::now();
-        socket.send_to(dns_probe_packet, addr).await?;
+        socket.send_to(DNS_PROBE_PACKET, addr).await?;
 
         let mut buf = [0u8; 512];
-        let _ = timeout(Duration::from_millis(1500), socket.recv_from(&mut buf)).await??;
-
-        let latency = start.elapsed();
-        Ok(latency)
+        match timeout(UDP_PROBE_TIMEOUT, socket.recv_from(&mut buf)).await {
+            Ok(Ok(_)) => Ok(start.elapsed()),
+            Ok(Err(err)) => Err(err.into()),
+            Err(_) => Err(Error::UdpTimeout),
+        }
     }
 }
 
