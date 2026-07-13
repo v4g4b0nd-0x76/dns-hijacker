@@ -1,0 +1,8 @@
+drop_list = [
+    "google.com",
+    "example.com",
+]
+
+redirect_list = [
+    "test.com:192.168.1.1",
+]
