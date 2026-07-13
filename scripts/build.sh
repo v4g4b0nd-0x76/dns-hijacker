@@ -59,8 +59,9 @@ cmd="${1:-auto}"
 case "$cmd" in
   auto)
     if [[ "$host_os" == "Darwin" ]]; then
-      # M4 / Apple Silicon
-      build_one "aarch64-apple-darwin" "-C target-cpu=native"
+      # Do not pass -C target-cpu=native: ring asserts CAPS_STATIC for the
+      # generic aarch64-apple-darwin feature set and panics otherwise.
+      build_one "aarch64-apple-darwin"
     elif [[ "$host_os" == "Linux" ]]; then
       if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
         build_one "aarch64-unknown-linux-gnu" "-C target-cpu=native"
@@ -85,12 +86,9 @@ case "$cmd" in
     build_one "aarch64-unknown-linux-musl" "-C target-feature=+crt-static"
     ;;
   mac|macos|m4)
-    if [[ "$host_os" == "Darwin" ]]; then
-      build_one "aarch64-apple-darwin" "-C target-cpu=native"
-    else
-      # Cross from Linux needs a Darwin linker (osxcross / zig).
-      build_one "aarch64-apple-darwin"
-    fi
+    # Portable Apple Silicon binary (M1–M4). Avoid target-cpu=native — it breaks
+    # ring's aarch64-apple-darwin compile-time CPU feature assertions on CI.
+    build_one "aarch64-apple-darwin"
     ;;
   all)
     build_one "x86_64-unknown-linux-gnu" || true
