@@ -1,5 +1,10 @@
 use serde::Deserialize;
-use std::{io, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{net::UdpSocket, time::timeout};
 
 const LOCAL_DNS: &str = "0.0.0.0:553";
@@ -33,8 +38,12 @@ async fn main() -> io::Result<()> {
             None => continue,
         };
         println!("Resolving {}", domain);
-        if conf.drop_list.contains(&domain) {
-            // drop dns request
+        let should_drop = conf
+            .drop_list
+            .iter()
+            .any(|pattern| matches_domain_pattern(&domain, pattern));
+
+        if should_drop {
             println!("[Dropped] {}", domain);
             if let Some(resp) = craft_nxdomain_response(payload) {
                 let _ = server_socket.send_to(&resp, src_addr).await;
@@ -42,8 +51,19 @@ async fn main() -> io::Result<()> {
             continue;
         }
 
-        if let Some((_, ip)) = conf.redirect_list.iter().find(|(d, _)| d == &domain) {
-            println!("[REDIRECT] {} -> {}", domain, ip);
+        let redirect_target = conf
+            .redirect_list
+            .iter()
+            .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
+
+        if let Some((_, ip_with_port)) = redirect_target {
+            // Safe port stripping handled before calling packet crafter
+            let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
+
+            println!(
+                "[REDIRECT] {} -> {}",
+                domain, ip
+            );
             if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
                 let _ = server_socket.send_to(&resp, src_addr).await;
             }
@@ -51,17 +71,14 @@ async fn main() -> io::Result<()> {
         }
 
         let resolver = resolver_picker.pick();
-        match resolve_from_upstream(payload, &upstream_socket,resolver ).await {
+        match resolve_from_upstream(payload, &upstream_socket, resolver).await {
             Ok((reply_buf, reply_len)) => {
                 let _ = server_socket
                     .send_to(&reply_buf[..reply_len], src_addr)
                     .await;
             }
             Err(err) => {
-                eprintln!(
-                    "failed to resolve {} from {}: {}",
-                    domain, resolver, err
-                );
+                eprintln!("failed to resolve {} from {}: {}", domain, resolver, err);
                 continue;
             }
         }
@@ -259,8 +276,11 @@ impl ResolverPicker {
 
         // 4. Extract sorted resolver strings
         let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
-        
-        println!("[PICKER] Healthy upstreams discovered: {:?}", sorted_resolvers);
+
+        println!(
+            "[PICKER] Healthy upstreams discovered: {:?}",
+            sorted_resolvers
+        );
 
         Ok(Self {
             healthy_resolvers: Arc::new(sorted_resolvers),
@@ -273,7 +293,7 @@ impl ResolverPicker {
         &self.healthy_resolvers[0]
     }
 
-    /// Sends a lightweight standard DNS query payload for 'google.com' 
+    /// Sends a lightweight standard DNS query payload for 'google.com'
     /// to determine if a server is online and track its round-trip time.
     async fn measure_latency(resolver: &str) -> io::Result<Duration> {
         let addr: SocketAddr = resolver
@@ -281,7 +301,7 @@ impl ResolverPicker {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        
+
         // A minimal, hardcoded raw binary DNS query packet for 'google.com' (A record)
         let dns_probe_packet: &[u8] = &[
             0xAA, 0xBB, // Transaction ID
@@ -291,10 +311,10 @@ impl ResolverPicker {
             0x00, 0x00, // Authority RRs: 0
             0x00, 0x00, // Additional RRs: 0
             0x06, b'g', b'o', b'o', b'g', b'l', b'e', // Label: google
-            0x03, b'c', b'o', b'm',                  // Label: com
-            0x00,                                     // Null terminator
-            0x00, 0x01,                               // Type: A
-            0x00, 0x01,                               // Class: IN
+            0x03, b'c', b'o', b'm', // Label: com
+            0x00, // Null terminator
+            0x00, 0x01, // Type: A
+            0x00, 0x01, // Class: IN
         ];
 
         let start = Instant::now();
@@ -303,8 +323,25 @@ impl ResolverPicker {
         let mut buf = [0u8; 512];
         // Enforce a strict 1.5-second timeout so slow/dead resolvers drop quickly
         let _ = timeout(Duration::from_millis(1500), socket.recv_from(&mut buf)).await??;
-        
+
         let latency = start.elapsed();
         Ok(latency)
     }
+}
+
+/// # Helpers
+fn matches_domain_pattern(domain: &str, pattern: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_lowercase();
+    let pattern = pattern.trim_end_matches('.').to_lowercase();
+
+    if domain == pattern {
+        return true;
+    }
+
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        // Matches "example.com" directly or any subdomain like "://example.com"
+        return domain == suffix || domain.ends_with(&format!(".{}", suffix));
+    }
+
+    false
 }
