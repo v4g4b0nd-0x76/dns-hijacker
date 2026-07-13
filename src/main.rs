@@ -1,17 +1,17 @@
 use serde::Deserialize;
 use std::{
-    fmt,
-    io,
+    fmt, io,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{net::UdpSocket, time::timeout};
+use tokio::{net::UdpSocket, sync::Semaphore, time::timeout};
 
 const LOCAL_DNS: &str = "0.0.0.0:553";
 const PAYLOAD_BUF_SIZE: usize = 1024;
 const DOH_TIMEOUT: Duration = Duration::from_secs(5);
 const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const RESOLVE_SEMAPHORE: usize = 100;
 
 /// Minimal DNS query for `google.com` A record, used as a health-check probe.
 const DNS_PROBE_PACKET: &[u8] = &[
@@ -110,11 +110,13 @@ impl From<DohError> for Error {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
-    let conf = load_conf()?;
+    let conf = Arc::new(load_conf()?);
     let http = build_http_client()?;
-    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
-    let server_socket = UdpSocket::bind(LOCAL_DNS).await?;
-    let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?; // todo: recheck the connection each x second
+    let resolver_picker =
+        ResolverPicker::new(conf.resolvers.clone(), http.clone()).await?;
+    let server_socket = Arc::new(UdpSocket::bind(LOCAL_DNS).await?);
+    let upstream_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?); // todo: recheck the connection each x second
+    let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
 
     println!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
@@ -126,57 +128,92 @@ async fn main() -> Result<(), Error> {
                 continue;
             }
         };
-        let payload = &buf[..len];
-        if len < 12 {
-            eprintln!("invalid payload len");
+
+        let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
+            eprintln!("reached semaphore maximum");
             continue;
-        }
-        // extract domain at offset of 12
-        let (domain, qname_end) = match parse_domain(payload, 12) {
-            Some(res) => res,
-            None => continue,
         };
-        println!("Resolving {}", domain);
-        let should_drop = conf
-            .drop_list
-            .iter()
-            .any(|pattern| matches_domain_pattern(&domain, pattern));
 
-        if should_drop {
-            println!("[Dropped] {}", domain);
-            if let Some(resp) = craft_nxdomain_response(payload) {
-                let _ = server_socket.send_to(&resp, src_addr).await;
-            }
-            continue;
+        let payload = buf[..len].to_vec();
+        let conf = Arc::clone(&conf);
+        let http = http.clone();
+        let resolver_picker = resolver_picker.clone();
+        let server_socket = Arc::clone(&server_socket);
+        let upstream_socket = Arc::clone(&upstream_socket);
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            handle_query(
+                &payload,
+                src_addr,
+                &conf,
+                &resolver_picker,
+                &server_socket,
+                &upstream_socket,
+                &http,
+            )
+            .await;
+        });
+    }
+}
+
+async fn handle_query(
+    payload: &[u8],
+    src_addr: SocketAddr,
+    conf: &Conf,
+    resolver_picker: &ResolverPicker,
+    server_socket: &UdpSocket,
+    upstream_socket: &UdpSocket,
+    http: &reqwest::Client,
+) {
+    if payload.len() < 12 {
+        eprintln!("invalid payload len");
+        return;
+    }
+
+    let (domain, qname_end) = match parse_domain(payload, 12) {
+        Some(res) => res,
+        None => return,
+    };
+    println!("Resolving {}", domain);
+
+    let should_drop = conf
+        .drop_list
+        .iter()
+        .any(|pattern| matches_domain_pattern(&domain, pattern));
+
+    if should_drop {
+        println!("[Dropped] {}", domain);
+        if let Some(resp) = craft_nxdomain_response(payload) {
+            let _ = server_socket.send_to(&resp, src_addr).await;
         }
+        return;
+    }
 
-        let redirect_target = conf
-            .redirect_list
-            .iter()
-            .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
+    let redirect_target = conf
+        .redirect_list
+        .iter()
+        .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
 
-        if let Some((_, ip_with_port)) = redirect_target {
-            // Safe port stripping handled before calling packet crafter
-            let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
+    if let Some((_, ip_with_port)) = redirect_target {
+        let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
 
-            println!("[REDIRECT] {} -> {}", domain, ip);
-            if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
-                let _ = server_socket.send_to(&resp, src_addr).await;
-            }
-            continue;
+        println!("[REDIRECT] {} -> {}", domain, ip);
+        if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
+            let _ = server_socket.send_to(&resp, src_addr).await;
         }
+        return;
+    }
 
-        let resolver = resolver_picker.pick();
-        match resolve_from_upstream(payload, &upstream_socket, resolver, src_addr, &http).await {
-            Ok((reply_buf, reply_len)) => {
-                let _ = server_socket
-                    .send_to(&reply_buf[..reply_len], src_addr)
-                    .await;
-            }
-            Err(err) => {
-                eprintln!("failed to resolve {} from {}: {}", domain, resolver, err);
-                continue;
-            }
+    let resolver = resolver_picker.pick();
+    match resolve_from_upstream(payload, upstream_socket, resolver, src_addr, http).await {
+        Ok((reply_buf, reply_len)) => {
+            let _ = server_socket
+                .send_to(&reply_buf[..reply_len], src_addr)
+                .await;
+        }
+        Err(err) => {
+            eprintln!("failed to resolve {} from {}: {}", domain, resolver, err);
         }
     }
 }
