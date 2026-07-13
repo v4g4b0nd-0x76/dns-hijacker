@@ -7,3 +7,6 @@ edition = "2024"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
+reqwest = { version = "0.12", features= ["native-tls","rustls-tls",], default-features = false }
+openssl = { version = "0.10.35", features = ["vendored"] }
+
