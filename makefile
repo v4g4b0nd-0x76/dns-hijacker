@@ -1,4 +1,4 @@
-.PHONY: build build-gnu build-musl build-mac test run caps
+.PHONY: build build-gnu build-musl build-mac test run caps patch minor major
 
 build:
 	@./scripts/build.sh auto
@@ -22,3 +22,14 @@ run: build
 # Linux: allow binding :53 without root (alternative to systemd AmbientCapabilities)
 caps:
 	@sudo setcap cap_net_bind_service=+ep ./target/release/dns-hijacker
+
+# Semver bump: updates Cargo.toml, commits, tags vX.Y.Z
+# Optional: PUSH=1 make patch  (also pushes commit + tag)
+patch:
+	@PUSH="$(PUSH)" ./scripts/bump.sh patch
+
+minor:
+	@PUSH="$(PUSH)" ./scripts/bump.sh minor
+
+major:
+	@PUSH="$(PUSH)" ./scripts/bump.sh major
