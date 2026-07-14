@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bump semver in Cargo.toml, commit, and create an annotated git tag.
 #
+# The commit message "chore: release vX.Y.Z" triggers .github/workflows/release.yml
+# when pushed to main/master.
+#
 # Usage:
 #   ./scripts/bump.sh patch|minor|major
 #   PUSH=1 ./scripts/bump.sh patch   # also push commit + tag to origin
