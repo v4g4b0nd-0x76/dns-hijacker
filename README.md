@@ -49,6 +49,11 @@ refresh_interval = 30
 ipv4 = true 
 doh = true
 
+[hotreload_conf]
+enable = true 
+poll_interval_ms = 100
+
+
 ```
 
 **There is a simple LRU cache implemented that there is no need for sending Qname request to resolvers after first resolve**
@@ -57,5 +62,5 @@ doh = true
 - [x] Add TTL to LRU cache 
 - [x] Remove the blocking `println` and replace with tracing
 - [x] Add a resolver discovery service to find public resolvers(might be useful during filtering)
-- [ ] Hot reload for config
+- [x] Hot reload for config
 - [ ] For uncached domains queue all request and dont resolve multiple time resolve one time and cache them repond all of them with 1 IO reqeust

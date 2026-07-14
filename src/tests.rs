@@ -170,6 +170,9 @@ async fn integration_redirect_and_drop_over_udp() {
         resolvers: vec!["127.0.0.1:9".into()],
         ..Default::default()
     };
+    let redirect_list = Arc::new(conf.redirect_list.clone());
+    let drop_list = Arc::new(conf.drop_list.clone());
+
     let picker = ResolverPicker::from_healthy(vec!["127.0.0.1:9".into()]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
@@ -180,7 +183,17 @@ async fn integration_redirect_and_drop_over_udp() {
     client.send_to(&redirect_query, server_addr).await.unwrap();
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &Arc::new(conf.redirect_list),
+        &Arc::new(conf.drop_list),
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert!(resp_len > redirect_query.len());
@@ -190,7 +203,17 @@ async fn integration_redirect_and_drop_over_udp() {
     let drop_query = mock_query_blocked_example();
     client.send_to(&drop_query, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &redirect_list,
+        &drop_list,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(resp_len, drop_query.len());
@@ -220,6 +243,9 @@ async fn integration_udp_upstream_echo() {
         resolvers: vec![upstream_addr.to_string()],
         ..Default::default()
     };
+    let redirect_list = Arc::new(conf.redirect_list.clone());
+    let drop_list = Arc::new(conf.drop_list.clone());
+
     let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
@@ -231,7 +257,17 @@ async fn integration_udp_upstream_echo() {
 
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &redirect_list,
+        &drop_list,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
         .await
@@ -272,6 +308,9 @@ async fn integration_cache_hit_skips_upstream() {
         resolvers: vec![upstream_addr.to_string()],
         ..Default::default()
     };
+    let redirect_list = Arc::new(conf.redirect_list.clone());
+    let drop_list = Arc::new(conf.drop_list.clone());
+
     let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
@@ -285,7 +324,7 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(&buf[..len], src, &redirect_list, &drop_list, &picker, &server, &http, &cache).await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x01, 0x01]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -295,7 +334,7 @@ async fn integration_cache_hit_skips_upstream() {
     q2[1] = 0x02;
     client.send_to(&q2, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(&buf[..len], src, &redirect_list,&drop_list, &picker, &server, &http, &cache).await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x02, 0x02]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -320,6 +359,9 @@ async fn integration_resolve_timeout_returns_servfail() {
         resolvers: vec![blackhole_addr.to_string()],
         ..Default::default()
     };
+        let redirect_list = Arc::new(conf.redirect_list.clone());
+    let drop_list = Arc::new(conf.drop_list.clone());
+
     let picker = ResolverPicker::from_healthy(vec![blackhole_addr.to_string()]);
     let http = reqwest::Client::builder()
         .timeout(RESOLVE_TIMEOUT)
@@ -332,7 +374,7 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
-    handle_query(&buf[..len], src, &conf, &picker, &server, &http, &cache).await;
+    handle_query(&buf[..len], src, &redirect_list, &drop_list, &picker, &server, &http, &cache).await;
     let elapsed = started.elapsed();
     assert!(
         elapsed >= RESOLVE_TIMEOUT && elapsed < RESOLVE_TIMEOUT + Duration::from_secs(1),

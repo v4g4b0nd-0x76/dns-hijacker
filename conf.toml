@@ -1,6 +1,7 @@
 drop_list = [
     "google.com",
     "*.example.com",
+    "yahoo.com"
 ]
 
 redirect_list = [
@@ -22,3 +23,8 @@ resolver_source = [
 refresh_interval = 30
 ipv4 = true 
 doh = true
+
+
+[hotreload_conf]
+enable = true 
+poll_interval_ms = 100

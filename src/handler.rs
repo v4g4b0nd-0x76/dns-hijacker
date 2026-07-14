@@ -1,19 +1,18 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
-    cache::{cache_key_from_query, cache_lookup, cache_store, ResponseCache},
-    conf::Conf,
+    cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
     constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
         matches_domain_pattern, parse_domain, with_txid,
     },
     errors::Error,
-    resolver::{resolve_from_upstream, ResolverPicker},
+    resolver::{ResolverPicker, resolve_from_upstream},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol, Socket, Type};
@@ -38,7 +37,8 @@ pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
 pub async fn handle_query(
     payload: &[u8],
     src_addr: SocketAddr,
-    conf: &Conf,
+    redirect_list: &Arc<Vec<(String, String)>>,
+    drop_list: &Arc<Vec<String>>,
     resolver_picker: &ResolverPicker,
     server_socket: &UdpSocket,
     http: &reqwest::Client,
@@ -55,8 +55,7 @@ pub async fn handle_query(
     };
     debug!("Resolving {}", domain);
 
-    let should_drop = conf
-        .drop_list
+    let should_drop = drop_list
         .iter()
         .any(|pattern| matches_domain_pattern(&domain, pattern));
 
@@ -68,8 +67,7 @@ pub async fn handle_query(
         return;
     }
 
-    let redirect_target = conf
-        .redirect_list
+    let redirect_target = redirect_list
         .iter()
         .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
 
