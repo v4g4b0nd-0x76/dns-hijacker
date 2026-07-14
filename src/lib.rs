@@ -23,7 +23,7 @@ pub mod constants {
     pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
     pub const DOH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     pub const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
-    pub const RESOLVE_SEMAPHORE: usize = 100;
+    pub const RESOLVE_SEMAPHORE: usize = 1_000_000;
     pub const RECV_BATCH_MAX: usize = 32;
     pub const SOCKET_BUF_SIZE: usize = 4 * 1024 * 1024;
     pub const CACHE_CAPACITY: usize = 4096;

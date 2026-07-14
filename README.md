@@ -63,4 +63,12 @@ poll_interval_ms = 100
 - [x] Remove the blocking `println` and replace with tracing
 - [x] Add a resolver discovery service to find public resolvers(might be useful during filtering)
 - [x] Hot reload for config
+- [ ] redirect with multi ip
+- [ ] add google geo ip for redirect google ips
+```text
+https://www.gstatic.com/ipranges/goog.json
+https://www.gstatic.com/ipranges/cloud.json
+# using this code written by me for finding google ips 
+https://github.com/therealaleph/MasterHttpRelayVPN-RUST/blob/main/src/scan_ips.rs
+```
 - [ ] For uncached domains queue all request and dont resolve multiple time resolve one time and cache them repond all of them with 1 IO reqeust
