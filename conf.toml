@@ -1,9 +1,9 @@
 drop_list = [
     "*.example.com",
-    "google.com"
 ]
 
 redirect_list = [
+    "google.com:1.1.1.1,2.2.2.2",
     "*.test.com:192.168.1.1",
     "*.youtube.com:142.251.37.110",
     "*.googlevideo.com:142.250.191.174",

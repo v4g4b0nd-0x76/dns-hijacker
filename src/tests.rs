@@ -89,11 +89,19 @@ fn craft_servfail_sets_rcode() {
 fn craft_redirect_appends_a_record() {
     let query = mock_query_foo_test_com();
     let (_, qname_end) = parse_domain(&query, 12).expect("parse");
-    let resp = craft_redirect_response(&query, qname_end, "192.168.1.1").expect("redirect");
+    let resp = craft_redirect_response(&query, qname_end, vec!["192.168.1.1", "192.168.1.2"])
+        .expect("redirect");
 
-    assert_eq!(resp[7], 1);
-    assert_eq!(&resp[resp.len() - 4..], &[192, 168, 1, 1]);
-    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]);
+    assert_eq!(resp[6], 0x00);
+    assert_eq!(resp[7], 2);
+
+    assert_eq!(&resp[resp.len() - 4..], &[192, 168, 1, 2]);
+    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]); // RDLENGTH = 4
+
+    let record_len = 16;
+    let first_record_start = resp.len() - (record_len * 2);
+    let first_rdata = &resp[first_record_start + 12..first_record_start + 16];
+    assert_eq!(first_rdata, &[192, 168, 1, 1]);
 }
 
 #[test]
@@ -134,7 +142,7 @@ fn clamp_cache_ttl_bounds() {
 fn min_answer_ttl_from_redirect_packet() {
     let query = mock_query_google().to_vec();
     let (_, qname_end) = parse_domain(&query, 12).unwrap();
-    let resp = craft_redirect_response(&query, qname_end, "1.2.3.4").unwrap();
+    let resp = craft_redirect_response(&query, qname_end, vec!["1.2.3.4"]).unwrap();
     assert_eq!(min_answer_ttl(&resp), Some(60));
 }
 
@@ -144,7 +152,7 @@ fn cache_store_and_lookup_rewrites_txid_on_serve() {
     let query = mock_query_google();
     let key = cache_key_from_query(query).unwrap();
     let (_, qname_end) = parse_domain(query, 12).unwrap();
-    let mut answer = craft_redirect_response(query, qname_end, "9.9.9.9").unwrap();
+    let mut answer = craft_redirect_response(query, qname_end, vec!["9.9.9.9"]).unwrap();
     answer[0] = 0x11;
     answer[1] = 0x22;
 
@@ -228,7 +236,7 @@ async fn integration_udp_upstream_echo() {
         let mut buf = [0u8; 512];
         let (len, src) = upstream_mock.recv_from(&mut buf).await.unwrap();
         let (_, qname_end) = parse_domain(&buf[..len], 12).unwrap();
-        let answer = craft_redirect_response(&buf[..len], qname_end, "8.8.4.4").unwrap();
+        let answer = craft_redirect_response(&buf[..len], qname_end, vec!["8.8.4.4"]).unwrap();
         let _ = upstream_mock.send_to(&answer, src).await;
     });
 
@@ -288,7 +296,7 @@ async fn integration_cache_hit_skips_upstream() {
         let (len, src) = upstream_mock.recv_from(&mut buf).await.unwrap();
         hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (_, qname_end) = parse_domain(&buf[..len], 12).unwrap();
-        let answer = craft_redirect_response(&buf[..len], qname_end, "1.1.1.1").unwrap();
+        let answer = craft_redirect_response(&buf[..len], qname_end, vec!["1.1.1.1"]).unwrap();
         let _ = upstream_mock.send_to(&answer, src).await;
         let _ = timeout(
             Duration::from_millis(200),

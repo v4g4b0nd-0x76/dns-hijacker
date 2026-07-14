@@ -40,34 +40,47 @@ pub fn parse_domain(payload: &[u8], mut offset: usize) -> Option<(String, usize)
 
 #[inline(always)]
 /// Crafts a manual DNS answer appending a hardcoded A record to the request.
-pub fn craft_redirect_response(payload: &[u8], qname_end: usize, ip_str: &str) -> Option<Vec<u8>> {
+pub fn craft_redirect_response(
+    payload: &[u8],
+    qname_end: usize,
+    ips_str: Vec<&str>,
+) -> Option<Vec<u8>> {
     let mut resp = payload.to_vec();
     if resp.len() < 12 {
         return None;
     }
-
     resp[2] = 0x81;
     resp[3] = 0x80;
-    resp[7] = 1;
 
     if qname_end + 4 > resp.len() {
         return None;
     }
-
     let mut qtype = [0u8; 2];
     qtype.copy_from_slice(&resp[qname_end..qname_end + 2]);
-
     let mut qclass = [0u8; 2];
     qclass.copy_from_slice(&resp[qname_end + 2..qname_end + 4]);
 
-    resp.extend_from_slice(&[0xC0, 0x0C]);
-    resp.extend_from_slice(&qtype);
-    resp.extend_from_slice(&qclass);
-    resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);
+    let ips: Vec<std::net::Ipv4Addr> = ips_str
+        .iter()
+        .filter_map(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+        .collect();
 
-    let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
-    resp.extend_from_slice(&[0x00, 0x04]);
-    resp.extend_from_slice(&ip.octets());
+    if ips.is_empty() {
+        return None; // nothing valid to redirect to
+    }
+
+    let ancount = ips.len() as u16;
+    resp[6] = (ancount >> 8) as u8;
+    resp[7] = (ancount & 0xFF) as u8;
+
+    for ip in &ips {
+        resp.extend_from_slice(&[0xC0, 0x0C]);             // name = pointer to offset 12 (query name)
+        resp.extend_from_slice(&qtype);
+        resp.extend_from_slice(&qclass);
+        resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL = 60s
+        resp.extend_from_slice(&[0x00, 0x04]);             // RDLENGTH
+        resp.extend_from_slice(&ip.octets());
+    }
 
     Some(resp)
 }

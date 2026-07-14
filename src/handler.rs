@@ -72,10 +72,14 @@ pub async fn handle_query(
         .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
 
     if let Some((_, ip_with_port)) = redirect_target {
-        let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
+        let ips: Vec<&str> = ip_with_port
+            .split(',')
+            .map(|entry| entry.split(':').next().unwrap_or(entry))
+            .collect();
 
-        warn!("[REDIRECT] {} -> {}", domain, ip);
-        if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
+        warn!("[REDIRECT] {} -> {:?}", domain, ips);
+
+        if let Some(resp) = craft_redirect_response(payload, qname_end, ips) {
             let _ = server_socket.send_to(&resp, src_addr).await;
         }
         return;
