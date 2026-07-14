@@ -538,7 +538,7 @@ garbage
         let ipv4_only = parse_resolver_list(body, true, false);
         assert_eq!(
             ipv4_only,
-            vec!["1.1.1.1:53".to_string(), "8.8.8.8".to_string()]
+            vec!["1.1.1.1:53".to_string(), "8.8.8.8:53".to_string()]
         );
 
         let doh_only = parse_resolver_list(body, false, true);
