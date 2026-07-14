@@ -23,7 +23,7 @@ run: build
 caps:
 	@sudo setcap cap_net_bind_service=+ep ./target/release/dns-hijacker
 
-# Semver bump: updates Cargo.toml, commits, tags vX.Y.Z
+# Semver bump: updates Cargo.toml, commits "chore: release vX.Y.Z" (triggers release.yml), tags vX.Y.Z
 # Optional: PUSH=1 make patch  (also pushes commit + tag)
 patch:
 	@PUSH="$(PUSH)" ./scripts/bump.sh patch
