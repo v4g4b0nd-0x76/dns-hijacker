@@ -12,3 +12,13 @@ resolvers = [
     "8.8.8.8:53",
     "1.1.1.1:53",
 ]
+
+[resolver_searching]
+enable = true
+resolver_source = [
+ "https://public-dns.info/nameservers-all.txt",
+ "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt"
+]
+refresh_interval = 30
+ipv4 = true 
+doh = true

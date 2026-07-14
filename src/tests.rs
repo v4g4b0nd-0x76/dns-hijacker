@@ -10,7 +10,7 @@ use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
     cache::{
-        cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl, CacheKey, ResponseCache,
+        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
     },
     conf::Conf,
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
@@ -168,6 +168,7 @@ async fn integration_redirect_and_drop_over_udp() {
         drop_list: vec!["*.example.com".into()],
         redirect_list: vec![("*.test.com".into(), "192.168.1.1".into())],
         resolvers: vec!["127.0.0.1:9".into()],
+        ..Default::default()
     };
     let picker = ResolverPicker::from_healthy(vec!["127.0.0.1:9".into()]);
     let http = reqwest::Client::builder()
@@ -217,6 +218,7 @@ async fn integration_udp_upstream_echo() {
         drop_list: vec![],
         redirect_list: vec![],
         resolvers: vec![upstream_addr.to_string()],
+        ..Default::default()
     };
     let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
     let http = reqwest::Client::builder()
@@ -252,7 +254,11 @@ async fn integration_cache_hit_skips_upstream() {
         let (_, qname_end) = parse_domain(&buf[..len], 12).unwrap();
         let answer = craft_redirect_response(&buf[..len], qname_end, "1.1.1.1").unwrap();
         let _ = upstream_mock.send_to(&answer, src).await;
-        let _ = timeout(Duration::from_millis(200), upstream_mock.recv_from(&mut buf)).await;
+        let _ = timeout(
+            Duration::from_millis(200),
+            upstream_mock.recv_from(&mut buf),
+        )
+        .await;
     });
 
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -264,6 +270,7 @@ async fn integration_cache_hit_skips_upstream() {
         drop_list: vec![],
         redirect_list: vec![],
         resolvers: vec![upstream_addr.to_string()],
+        ..Default::default()
     };
     let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
     let http = reqwest::Client::builder()
@@ -311,6 +318,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         drop_list: vec![],
         redirect_list: vec![],
         resolvers: vec![blackhole_addr.to_string()],
+        ..Default::default()
     };
     let picker = ResolverPicker::from_healthy(vec![blackhole_addr.to_string()]);
     let http = reqwest::Client::builder()
