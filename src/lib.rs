@@ -6,12 +6,14 @@ pub mod dns;
 pub mod errors;
 pub mod handler;
 pub mod resolver;
+pub mod logger;
 
 pub use cache::{new_cache, ResponseCache};
 pub use conf::{load_conf, Conf};
 pub use errors::{DohError, Error};
 pub use handler::{bind_udp_socket, handle_query};
 pub use resolver::{build_http_client, ResolverPicker};
+pub use logger::{init_logger};
 
 pub mod constants {
     use std::time::Duration;

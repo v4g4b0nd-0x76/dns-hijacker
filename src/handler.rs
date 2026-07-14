@@ -13,6 +13,7 @@ use crate::{
     errors::Error,
     resolver::{resolve_from_upstream, ResolverPicker},
 };
+use tracing::{debug, error, info, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol, Socket, Type};
@@ -44,7 +45,7 @@ pub async fn handle_query(
     cache: &ResponseCache,
 ) {
     if payload.len() < 12 {
-        eprintln!("invalid payload len");
+        error!("invalid payload len");
         return;
     }
 
@@ -52,7 +53,7 @@ pub async fn handle_query(
         Some(res) => res,
         None => return,
     };
-    println!("Resolving {}", domain);
+    info!("Resolving {}", domain);
 
     let should_drop = conf
         .drop_list
@@ -60,7 +61,7 @@ pub async fn handle_query(
         .any(|pattern| matches_domain_pattern(&domain, pattern));
 
     if should_drop {
-        println!("[Dropped] {}", domain);
+        warn!("[Dropped] {}", domain);
         if let Some(resp) = craft_nxdomain_response(payload) {
             let _ = server_socket.send_to(&resp, src_addr).await;
         }
@@ -75,7 +76,7 @@ pub async fn handle_query(
     if let Some((_, ip_with_port)) = redirect_target {
         let ip = ip_with_port.split(':').next().unwrap_or(ip_with_port);
 
-        println!("[REDIRECT] {} -> {}", domain, ip);
+        warn!("[REDIRECT] {} -> {}", domain, ip);
         if let Some(resp) = craft_redirect_response(payload, qname_end, ip) {
             let _ = server_socket.send_to(&resp, src_addr).await;
         }
@@ -89,7 +90,7 @@ pub async fn handle_query(
     let req_txid = [payload[0], payload[1]];
 
     if let Some(cached) = cache_lookup(cache, &cache_key) {
-        println!("[CACHE HIT] {}", domain);
+        debug!("[CACHE HIT] {}", domain);
         let resp = with_txid(cached, req_txid);
         let _ = server_socket.send_to(&resp, src_addr).await;
         return;
@@ -108,7 +109,7 @@ pub async fn handle_query(
             let _ = server_socket.send_to(&resp, src_addr).await;
         }
         Ok(Err(Error::ResolveTimeout)) | Err(_) => {
-            eprintln!(
+            error!(
                 "resolve timed out for {} from {} after {:?}",
                 domain, resolver, RESOLVE_TIMEOUT
             );
@@ -117,7 +118,7 @@ pub async fn handle_query(
             }
         }
         Ok(Err(err)) => {
-            eprintln!("failed to resolve {} from {}: {}", domain, resolver, err);
+            error!("failed to resolve {} from {}: {}", domain, resolver, err);
         }
     }
 }

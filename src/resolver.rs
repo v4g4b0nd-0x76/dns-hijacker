@@ -11,6 +11,7 @@ use crate::{
     dns::inject_ecs_option,
     errors::{DohError, Error},
 };
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct ResolverPicker {
@@ -26,11 +27,11 @@ impl ResolverPicker {
             tasks.push(tokio::spawn(async move {
                 match Self::measure_latency(&resolver, &http).await {
                     Ok(latency) => {
-                        println!("[PICKER LOG] {} responded in {:?}", resolver, latency);
+                        info!("[PICKER LOG] {} responded in {:?}", resolver, latency);
                         Some((resolver, latency))
                     }
                     Err(e) => {
-                        eprintln!("[PICKER WARN] {} failed health check: {}", resolver, e);
+                        error!("[PICKER WARN] {} failed health check: {}", resolver, e);
                         None
                     }
                 }
@@ -52,7 +53,7 @@ impl ResolverPicker {
 
         let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
 
-        println!(
+        info!(
             "[PICKER] Healthy upstreams discovered and sorted: {:?}",
             sorted_resolvers
         );
