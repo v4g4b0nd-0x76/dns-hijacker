@@ -1,8 +1,11 @@
+use arc_swap::ArcSwap;
 use dns_hijacker::{
     Error, ResolverPicker, bind_udp_socket, build_http_client,
     conf::watch_conf_and_reload,
     constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
-    handle_query, init_logger, load_conf, new_cache, run_resolver_finder,
+    handle_query, init_logger, load_conf, new_cache,
+    resolver::Resolver,
+    run_resolver_finder,
 };
 use std::{
     io,
@@ -12,20 +15,57 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
-use arc_swap::ArcSwap;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "dns-hijacker",
+    version,
+    about = "Block, Redirect or Resolve your DNS query as you want"
+)]
+struct Cli {
+    /// Path to config file
+    #[arg(short, long, default_value = "conf.toml", global = true)]
+    conf: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the DNS server (default if no subcommand given)
+    Run,
+
+    /// Validate the config file and exit
+    CheckConf,
+
+    /// Print the current blocklist / redirect list and exit
+    ListRules,
+
+    Resolvers,
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     init_logger();
+    let cli = Cli::parse();
 
-    let conf_path = PathBuf::from("conf.toml");
-    let conf = Arc::new(RwLock::new(load_conf(&conf_path)?));
+    match cli.command.unwrap_or(Commands::Run) {
+        Commands::Run => run_server(&cli.conf).await,
+        Commands::CheckConf => check_conf(&cli.conf),
+        Commands::ListRules => list_rules(&cli.conf),
+        Commands::Resolvers => list_resolvers(&cli.conf).await,
+    }
+}
 
+async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
+    let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
     let hotreload_conf = {
         let conf_read = conf.read().unwrap();
         conf_read.hotreload_conf.clone()
     };
-
     let redirect_list: Arc<ArcSwap<Vec<(String, String)>>> = {
         let conf_read = conf.read().unwrap();
         Arc::new(ArcSwap::from_pointee(conf_read.redirect_list.clone()))
@@ -34,7 +74,6 @@ async fn main() -> Result<(), Error> {
         let conf_read = conf.read().unwrap();
         Arc::new(ArcSwap::from_pointee(conf_read.drop_list.clone()))
     };
-
     tokio::spawn(watch_conf_and_reload(
         conf_path.clone(),
         Duration::from_millis(hotreload_conf.poll_interval_ms),
@@ -42,9 +81,7 @@ async fn main() -> Result<(), Error> {
         Arc::clone(&redirect_list),
         Arc::clone(&drop_list),
     ));
-
     let http = build_http_client()?;
-
     let (initial_resolvers, resolver_searching, searching_enabled) = {
         let conf_read = conf.read().unwrap();
         (
@@ -54,9 +91,7 @@ async fn main() -> Result<(), Error> {
                 && !conf_read.resolver_searching.resolver_source.is_empty(),
         )
     };
-
     let resolver_picker = ResolverPicker::new(initial_resolvers, http.clone()).await?;
-
     if searching_enabled {
         let healthy_resolvers = resolver_picker.healthy_resolvers();
         tokio::spawn(async move {
@@ -68,13 +103,10 @@ async fn main() -> Result<(), Error> {
             }
         });
     }
-
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
     let cache = Arc::new(new_cache());
-
     info!("dns server listening at {}", LOCAL_DNS);
-
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {
@@ -84,7 +116,6 @@ async fn main() -> Result<(), Error> {
                 continue;
             }
         };
-
         let mut batch = Vec::with_capacity(RECV_BATCH_MAX);
         batch.push((buf[..len].to_vec(), src_addr));
         while batch.len() < RECV_BATCH_MAX {
@@ -97,13 +128,11 @@ async fn main() -> Result<(), Error> {
                 }
             }
         }
-
         for (payload, src_addr) in batch {
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
                 warn!("reached semaphore maximum");
                 continue;
             };
-
             let redirect_list = redirect_list.load_full();
             let drop_list = drop_list.load_full();
             let http = http.clone();
@@ -126,4 +155,58 @@ async fn main() -> Result<(), Error> {
             });
         }
     }
+}
+
+fn check_conf(conf_path: &PathBuf) -> Result<(), Error> {
+    match load_conf(conf_path) {
+        Ok(conf) => {
+            println!(
+                "conf OK: {} redirect rules, {} drop rules",
+                conf.redirect_list.len(),
+                conf.drop_list.len()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("conf error: {e}");
+            Err(e)
+        }
+    }
+}
+
+fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
+    let conf = load_conf(conf_path)?;
+    for domain in &conf.drop_list {
+        println!("DROP    {domain}");
+    }
+    for (from, to) in &conf.redirect_list {
+        println!("REDIRECT {from} -> {to}");
+    }
+    Ok(())
+}
+
+async fn list_resolvers(conf_path: &PathBuf) -> Result<(), Error> {
+    let conf = load_conf(conf_path)?;
+    let http = build_http_client()?;
+    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
+    let healthy = resolver_picker.healthy_resolvers();
+    let top_resolvers: Vec<Resolver> = {
+        let guard = healthy.read().unwrap();
+        let n = 10.min(guard.len());
+        guard[..n].to_vec()
+    };
+    clear_screen();
+    println!("{:<4}{:<40}{:>10}", "#", "Address", "Latency (ms)");
+    println!("{}", "-".repeat(54));
+    for (i, (addr, delay_ms)) in top_resolvers.iter().enumerate() {
+        println!("{:<4}{:<40}{:>10}\n", i + 1, addr, delay_ms.as_millis());
+    }
+
+    Ok(())
+}
+
+fn clear_screen() {
+    print!("\x1B[2J\x1B[1;1H"); // clear screen, move cursor to top-left
+    use std::io::Write;
+    std::io::stdout().flush().unwrap();
 }

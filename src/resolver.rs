@@ -7,7 +7,7 @@ use std::{
         Arc, LazyLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration},
+    time::Duration,
 };
 use tokio::{
     net::UdpSocket,
@@ -104,9 +104,10 @@ fn record_failed_resolver(resolver: String) {
     guard.set.insert(resolver);
 }
 
+pub type Resolver = (String, Duration); // address - delay
 #[derive(Clone)]
 pub struct ResolverPicker {
-    healthy_resolvers: Arc<RwLock<Vec<String>>>,
+    healthy_resolvers: Arc<RwLock<Vec<Resolver>>>,
 }
 
 impl ResolverPicker {
@@ -119,18 +120,18 @@ impl ResolverPicker {
     }
 
     /// Construct a picker that skips health checks (used by tests).
-    pub fn from_healthy(resolvers: Vec<String>) -> Self {
+    pub fn from_healthy(resolvers: Vec<Resolver>) -> Self {
         Self {
             healthy_resolvers: Arc::new(RwLock::new(resolvers)),
         }
     }
-    pub fn healthy_resolvers(&self) -> Arc<RwLock<Vec<String>>> {
+    pub fn healthy_resolvers(&self) -> Arc<RwLock<Vec<Resolver>>> {
         self.healthy_resolvers.clone()
     }
 
     pub fn pick(&self) -> String {
         let healthy_resolvers = self.healthy_resolvers.read().unwrap();
-        healthy_resolvers[0].clone()
+        healthy_resolvers[0].clone().0
     }
 }
 
@@ -199,7 +200,7 @@ pub async fn resolve_via_doh(
 async fn test_resolvers(
     resolvers: Vec<String>,
     http: reqwest::Client,
-) -> Result<Vec<String>, Error> {
+) -> Result<Vec<Resolver>, Error> {
     let mut results: Vec<(String, Duration)> =
         collect_concurrent(resolvers, HEALTH_CHECK_CONCURRENCY, move |resolver| {
             let http = http.clone();
@@ -226,7 +227,7 @@ async fn test_resolvers(
     }
 
     results.sort_unstable_by_key(|&(_, latency)| latency);
-    let sorted_resolvers: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
+    let sorted_resolvers: Vec<Resolver> = results.into_iter().collect();
 
     info!(
         "[PICKER] Healthy upstreams discovered and sorted: {:?}",
@@ -277,7 +278,7 @@ async fn measure_latency(resolver: &str, http: &reqwest::Client) -> Result<Durat
 
 pub async fn run_resolver_finder(
     resolver_searching: ResolverSearchingConf,
-    healthy_resolvers: Arc<RwLock<Vec<String>>>,
+    healthy_resolvers: Arc<RwLock<Vec<Resolver>>>,
     is_searching: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let mut tick = interval(Duration::from_secs(
@@ -348,7 +349,7 @@ pub async fn run_resolver_finder(
         }
         if let Ok(guard) = healthy_resolvers.read() {
             for known in guard.iter() {
-                candidates.remove(known);
+                candidates.remove(&known.0.to_string());
             }
         }
 
@@ -385,7 +386,7 @@ pub async fn run_resolver_finder(
         }
 
         results.sort_unstable_by_key(|&(_, latency)| latency);
-        let discovered: Vec<String> = results.into_iter().map(|(res, _)| res).collect();
+        let discovered: Vec<Resolver> = results.into_iter().collect();
         info!(
             "[PICKER] discovered {} new healthy resolvers in {}/ms",
             discovered.len(),
@@ -399,14 +400,14 @@ pub async fn run_resolver_finder(
 }
 
 fn merge_discovered_into_healthy(
-    healthy: &mut Vec<String>,
-    discovered: Vec<String>,
+    healthy: &mut Vec<Resolver>,
+    discovered: Vec<Resolver>,
     max_len: usize,
 ) {
-    let existing: HashSet<&str> = healthy.iter().map(String::as_str).collect();
+    let existing: HashSet<&str> = healthy.iter().map(|(addr, _)| addr.as_str()).collect();
     let mut prepend = Vec::with_capacity(discovered.len());
     for resolver in discovered {
-        if !existing.contains(resolver.as_str()) {
+        if !existing.contains(resolver.0.as_str()) {
             prepend.push(resolver);
         }
     }
@@ -553,27 +554,27 @@ garbage
 
     #[test]
     fn merge_discovered_prepends_dedups_and_caps() {
-        let mut healthy = vec!["old-a".into(), "old-b".into()];
+        let mut healthy = vec![create_resolver("old-a"), create_resolver("old-b")];
         merge_discovered_into_healthy(
             &mut healthy,
             vec![
-                "fast".into(),
-                "old-a".into(), // duplicate of existing
-                "mid".into(),
+                create_resolver("fast"),
+                create_resolver("old-a"),
+                create_resolver("mid")
             ],
             3,
         );
         assert_eq!(
-            healthy,
+            resolvers_to_addrs(&healthy),
             vec!["fast".to_string(), "mid".to_string(), "old-a".to_string()]
         );
     }
 
     #[test]
     fn merge_discovered_noop_when_all_known() {
-        let mut healthy = vec!["a".into(), "b".into()];
-        merge_discovered_into_healthy(&mut healthy, vec!["a".into(), "b".into()], 256);
-        assert_eq!(healthy, vec!["a".to_string(), "b".to_string()]);
+        let mut healthy = vec![create_resolver("a"), create_resolver("b")];
+        merge_discovered_into_healthy(&mut healthy, vec![create_resolver("a"), create_resolver("b")], 256);
+        assert_eq!(resolvers_to_addrs(&healthy), vec!["a", "b"]);
     }
 
     #[test]
@@ -635,7 +636,7 @@ garbage
 
     #[tokio::test]
     async fn run_resolver_finder_skips_when_already_searching() {
-        let healthy = Arc::new(RwLock::new(vec!["seed".into()]));
+        let healthy = Arc::new(RwLock::new(vec![create_resolver("seed")]));
         let is_searching = Arc::new(AtomicBool::new(true));
         let conf = ResolverSearchingConf {
             enable: true,
@@ -663,7 +664,7 @@ garbage
         );
         assert_eq!(
             *healthy.read().unwrap(),
-            vec!["seed".to_string()],
+            vec![create_resolver("seed")],
             "skip path must not mutate healthy_resolvers"
         );
 
@@ -673,22 +674,22 @@ garbage
 
     #[test]
     fn picker_pick_returns_first_healthy() {
-        let picker = ResolverPicker::from_healthy(vec!["a".into(), "b".into()]);
+        let picker = ResolverPicker::from_healthy(vec![create_resolver("a"), create_resolver("b")]);
         assert_eq!(picker.pick(), "a");
     }
 
     #[test]
     fn healthy_resolvers_shared_arc_sees_updates() {
-        let picker = ResolverPicker::from_healthy(vec!["seed".into()]);
+        let picker = ResolverPicker::from_healthy(vec![create_resolver("seed")]);
         let shared = picker.healthy_resolvers();
-        shared.write().unwrap().insert(0, "new".into());
+        shared.write().unwrap().insert(0, create_resolver("new"));
         assert_eq!(picker.pick(), "new");
-        assert_eq!(shared.read().unwrap()[0], "new");
+        assert_eq!(shared.read().unwrap()[0], create_resolver("new"));
     }
 
     #[test]
     fn healthy_resolvers_concurrent_picks_and_updates() {
-        let picker = ResolverPicker::from_healthy(vec!["seed".into()]);
+        let picker = ResolverPicker::from_healthy(vec![create_resolver("seed")]);
         let shared = picker.healthy_resolvers();
         let barrier = Arc::new(Barrier::new(9));
         let mut handles = Vec::with_capacity(9);
@@ -711,7 +712,7 @@ garbage
             for i in 0..2_000 {
                 let mut guard = shared.write().unwrap();
                 // Keep at least one entry so pick() never indexes empty.
-                *guard = vec![format!("r{i}"), "seed".into()];
+                *guard = vec![create_resolver(&format!("r{i}")), create_resolver("seed")];
                 if guard.len() > MAX_HEALTHY_RESOLVERS {
                     guard.truncate(MAX_HEALTHY_RESOLVERS);
                 }
@@ -726,7 +727,7 @@ garbage
 
     #[test]
     fn healthy_resolvers_concurrent_merges_stay_capped() {
-        let picker = ResolverPicker::from_healthy(vec!["seed".into()]);
+        let picker = ResolverPicker::from_healthy(vec![create_resolver("seed")]);
         let shared = picker.healthy_resolvers();
         let barrier = Arc::new(Barrier::new(5));
         let mut handles = Vec::with_capacity(5);
@@ -738,9 +739,9 @@ garbage
                 barrier.wait();
                 for i in 0..300 {
                     let discovered = vec![
-                        format!("t{t}-fast-{i}"),
-                        format!("t{t}-mid-{i}"),
-                        "seed".into(),
+                        create_resolver(&format!("t{t}-fast-{i}")),
+                        create_resolver(&format!("t{t}-mid-{i}")),
+                        create_resolver("seed"),
                     ];
                     let mut guard = shared.write().unwrap();
                     merge_discovered_into_healthy(&mut guard, discovered, MAX_HEALTHY_RESOLVERS);
@@ -767,4 +768,11 @@ garbage
         assert!(!guard.is_empty());
         assert!(guard.len() <= MAX_HEALTHY_RESOLVERS);
     }
+}
+
+pub fn create_resolver(addr: &str) -> Resolver {
+    (addr.to_string() , Duration::from_secs(0))
+}
+pub fn resolvers_to_addrs(resolvers: &[Resolver]) -> Vec<&str> {
+    resolvers.iter().map(|(addr, _)| addr.as_str()).collect()
 }

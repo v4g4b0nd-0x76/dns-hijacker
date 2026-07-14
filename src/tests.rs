@@ -19,7 +19,7 @@ use crate::{
         inject_ecs_option, matches_domain_pattern, min_answer_ttl, parse_domain, with_txid,
     },
     handler::handle_query,
-    resolver::ResolverPicker,
+    resolver::{ResolverPicker, create_resolver},
 };
 
 fn empty_cache() -> ResponseCache {
@@ -173,7 +173,7 @@ async fn integration_redirect_and_drop_over_udp() {
     let redirect_list = Arc::new(conf.redirect_list.clone());
     let drop_list = Arc::new(conf.drop_list.clone());
 
-    let picker = ResolverPicker::from_healthy(vec!["127.0.0.1:9".into()]);
+    let picker = ResolverPicker::from_healthy(vec![create_resolver("127.0.0.1:9")]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
@@ -246,7 +246,7 @@ async fn integration_udp_upstream_echo() {
     let redirect_list = Arc::new(conf.redirect_list.clone());
     let drop_list = Arc::new(conf.drop_list.clone());
 
-    let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
+    let picker = ResolverPicker::from_healthy(vec![create_resolver(&upstream_addr.to_string())]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
@@ -311,7 +311,7 @@ async fn integration_cache_hit_skips_upstream() {
     let redirect_list = Arc::new(conf.redirect_list.clone());
     let drop_list = Arc::new(conf.drop_list.clone());
 
-    let picker = ResolverPicker::from_healthy(vec![upstream_addr.to_string()]);
+    let picker = ResolverPicker::from_healthy(vec![create_resolver(&upstream_addr.to_string())]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
@@ -362,7 +362,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         let redirect_list = Arc::new(conf.redirect_list.clone());
     let drop_list = Arc::new(conf.drop_list.clone());
 
-    let picker = ResolverPicker::from_healthy(vec![blackhole_addr.to_string()]);
+    let picker = ResolverPicker::from_healthy(vec![create_resolver(&blackhole_addr.to_string())]);
     let http = reqwest::Client::builder()
         .timeout(RESOLVE_TIMEOUT)
         .build()
