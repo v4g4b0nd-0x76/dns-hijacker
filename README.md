@@ -13,6 +13,8 @@ Personally used to redirect blacklisted sites to an unknown destination.
 make test
 ```
 
+**NOTE: as there is need to bind to port 53 you shall either run the binary as sudo or give it permission by `sudo setcap cap_net_bind_service=+ep PATH_TO_BINARY`**
+
 ## Run as a service
 
 See [assets/SERVICES.md](assets/SERVICES.md) for systemd (Linux) and launchd (macOS) install steps.
@@ -42,6 +44,6 @@ resolvers = [
 **There is a simple LRU cache implemented that there is no need for sending Qname request to resolvers after first resolve**
 
 ## TODO 
-- [ ] Add TTL to LRU cache 
+- [x] Add TTL to LRU cache 
 - [ ] Remove the blocking `println` and replace with tracing
 - [ ] Add a resolver discovery service to find public resolvers(might be useful during filtering)

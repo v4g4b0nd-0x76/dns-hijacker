@@ -16,6 +16,9 @@ toml = { version = "1.1.2", default-features = false, features = ["parse", "serd
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 lru = "0.12"
 socket2 = "0.5"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [profile.release]
 # Size-first release build; LTO still inlines across crates for hot paths.

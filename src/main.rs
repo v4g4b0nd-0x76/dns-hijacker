@@ -1,9 +1,9 @@
 use std::{io, sync::Arc};
 
 use tokio::sync::Semaphore;
-
+use tracing::{info, error,warn};
 use dns_hijacker::{
-    bind_udp_socket, build_http_client, handle_query, load_conf, new_cache, ResolverPicker,
+    bind_udp_socket, build_http_client, handle_query, load_conf, new_cache, init_logger, ResolverPicker,
     constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
     Error,
 };
@@ -11,19 +11,20 @@ use dns_hijacker::{
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let conf = Arc::new(load_conf()?);
+    let _logger = init_logger();
     let http = build_http_client()?;
     let resolver_picker = ResolverPicker::new(conf.resolvers.clone(), http.clone()).await?;
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
     let cache = Arc::new(new_cache());
 
-    println!("dns server listening at {}", LOCAL_DNS);
+    info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {
             Ok(res) => res,
             Err(err) => {
-                eprintln!("failed to receive payload: {}", err);
+                error!("failed to receive payload: {}", err);
                 continue;
             }
         };
@@ -36,7 +37,7 @@ async fn main() -> Result<(), Error> {
                 Ok((n, addr)) => batch.push((buf[..n].to_vec(), addr)),
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) => {
-                    eprintln!("failed to drain payload: {}", err);
+                    error!("failed to drain payload: {}", err);
                     break;
                 }
             }
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Error> {
 
         for (payload, src_addr) in batch {
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
-                eprintln!("reached semaphore maximum");
+                warn!("reached semaphore maximum");
                 continue;
             };
 
