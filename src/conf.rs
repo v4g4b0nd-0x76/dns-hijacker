@@ -8,14 +8,25 @@ pub struct Conf {
     #[serde(deserialize_with = "deserialize_redirect_list")]
     pub redirect_list: Vec<(String, String)>,
     pub resolvers: Vec<String>,
+    #[serde(default)]
+    pub resolver_searching: ResolverSearchingConf,
 }
 
+#[derive(Clone,Default, Deserialize)]
+pub struct ResolverSearchingConf {
+    pub enable: bool,
+    pub resolver_source: Vec<String>,
+    #[serde(default)]
+    pub resfresh_interval: Option<u64>,
+    pub ipv4: bool,
+    pub doh: bool,
+}
 fn deserialize_redirect_list<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
     use serde::Deserialize;
+    use serde::de::Error;
 
     let entries = Vec::<String>::deserialize(deserializer)?;
 

@@ -53,7 +53,7 @@ pub async fn handle_query(
         Some(res) => res,
         None => return,
     };
-    info!("Resolving {}", domain);
+    debug!("Resolving {}", domain);
 
     let should_drop = conf
         .drop_list
@@ -99,7 +99,7 @@ pub async fn handle_query(
     let resolver = resolver_picker.pick();
     match timeout(
         RESOLVE_TIMEOUT,
-        resolve_from_upstream(payload, resolver, src_addr, http),
+        resolve_from_upstream(payload, &resolver, src_addr, http),
     )
     .await
     {

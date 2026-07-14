@@ -12,7 +12,7 @@ pub use cache::{new_cache, ResponseCache};
 pub use conf::{load_conf, Conf};
 pub use errors::{DohError, Error};
 pub use handler::{bind_udp_socket, handle_query};
-pub use resolver::{build_http_client, ResolverPicker};
+pub use resolver::{build_http_client,run_resolver_finder, ResolverPicker};
 pub use logger::{init_logger};
 
 pub mod constants {
@@ -30,6 +30,7 @@ pub mod constants {
     pub const CACHE_TTL_MIN: Duration = Duration::from_secs(5);
     pub const CACHE_TTL_MAX: Duration = Duration::from_secs(300);
     pub const CACHE_TTL_FALLBACK: Duration = Duration::from_secs(60);
+    pub const SEARCH_RESOLVER_INTERVAL : u64 = 15;
 
     /// Minimal DNS query for `google.com` A record, used as a health-check probe.
     pub const DNS_PROBE_PACKET: &[u8] = &[
