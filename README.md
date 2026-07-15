@@ -63,6 +63,7 @@ relay_url = "cloudflare worker url"
 ```
 
 **There is a simple LRU cache implemented that there is no need for sending Qname request to resolvers after first resolve**
+**There is also option for using cloudflare worker as relay to bypass the dns hijacking by DPI**
 
 ## TODO 
 - [x] Add TTL to LRU cache 
@@ -73,7 +74,7 @@ relay_url = "cloudflare worker url"
 - [x] resolve directly like dig 
 - [x] relay query to cloud flare worker
 - [x] use relay for all queries
-- [ ] add relay for resolve
+- [x] add relay for resolve
 - [ ] add google geo ip for redirect google ips
 **Idea: give this as a comamnd entry and specify as resolve_conf.toml that define the domain/sni and where it can find ips for it to create a redirect list for the actual ips not DPI dns resolver**
 ```text

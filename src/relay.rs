@@ -1,10 +1,10 @@
-use crate::Error;
+use crate::{Error, dns::build_lookup_query};
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use std::{net::Ipv4Addr, path::PathBuf};
+use std::path::PathBuf;
 
 pub fn gen_relay_key(_conf_path: &PathBuf) -> Result<(), Error> {
     let key = Aes256Gcm::generate_key(OsRng);
@@ -14,7 +14,7 @@ pub fn gen_relay_key(_conf_path: &PathBuf) -> Result<(), Error> {
 
 pub fn encode_for_relay(key: &Key<Aes256Gcm>, dns_message: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng); 
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, dns_message)
         .expect("encryption failure");
@@ -30,7 +30,7 @@ pub fn decode_from_relay(key: &Key<Aes256Gcm>, packet: &[u8]) -> Option<Vec<u8>>
         return None;
     }
     let (nonce_bytes, ciphertext) = packet.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes); 
+    let nonce = Nonce::from_slice(nonce_bytes);
     Aes256Gcm::new(key).decrypt(nonce, ciphertext).ok()
 }
 
@@ -53,6 +53,28 @@ pub async fn resolve_via_relay(
     dns_query: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let encrypted = encode_for_relay(key, dns_query);
+    let response = http
+        .post(worker_url)
+        .body(encrypted)
+        .send()
+        .await
+        .map_err(|e| Error::Config(e.to_string()))?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| Error::Config(e.to_string()))?;
+    decode_from_relay(key, &body).ok_or_else(|| Error::Config("decrypt failed".into()))
+}
+
+pub async fn resolve_domain_via_relay(
+    http: &reqwest::Client,
+    worker_url: &str,
+    key: &Key<Aes256Gcm>,
+    domain: &str,
+) -> Result<Vec<u8>, Error> {
+    let query = build_lookup_query(domain);
+
+    let encrypted = encode_for_relay(key, &query);
     let response = http
         .post(worker_url)
         .body(encrypted)

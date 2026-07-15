@@ -1,7 +1,18 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client, cache::new_domain_cache, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, helpers::clear_screen, init_logger, load_conf, new_cache, relay::load_key_from_str, resolver::Resolver, run_resolver_finder
+    Error, ResolverPicker, bind_udp_socket, build_http_client,
+    cache::new_domain_cache,
+    conf::watch_conf_and_reload,
+    constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
+    dns::parse_a_records,
+    gen_relay_key, handle_query,
+    handler::{client_for_relay, host_from_url},
+    helpers::clear_screen,
+    init_logger, load_conf, new_cache,
+    relay::{load_key_from_str, resolve_domain_via_relay},
+    resolver::Resolver,
+    run_resolver_finder,
 };
 use std::{
     io,
@@ -43,7 +54,8 @@ enum Commands {
     Resolve {
         #[arg(required = true)]
         domain: String,
-
+        #[arg(long)]
+        relay: bool,
         #[arg(required = false)]
         resolver: Option<String>,
     },
@@ -62,7 +74,11 @@ async fn main() -> Result<(), Error> {
         Commands::ListRules => list_rules(&cli.conf),
         Commands::Resolvers => list_resolvers(&cli.conf).await,
         Commands::GenRelayKey => gen_relay_key(&cli.conf),
-        Commands::Resolve { domain, resolver } => resolve(&cli.conf, &domain, resolver).await,
+        Commands::Resolve {
+            domain,
+            resolver,
+            relay,
+        } => resolve(&cli.conf, &domain, resolver, relay).await,
     }
 }
 
@@ -166,7 +182,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     &http,
                     &cache,
                     &relay_conf,
-                    &domain_cache
+                    &domain_cache,
                 )
                 .await;
             });
@@ -222,17 +238,72 @@ async fn list_resolvers(conf_path: &PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-async fn resolve(conf_path: &PathBuf, domain: &str, resolver: Option<String>) -> Result<(), Error> {
+async fn resolve(
+    conf_path: &PathBuf,
+    domain: &str,
+    resolver: Option<String>,
+    relay: bool,
+) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     let http = build_http_client()?;
     let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
-    let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
-    clear_screen();
-    if resolved.is_empty() {
-        println!(";; no A records found for {domain}");
+    if relay {
+        info!("resolving {} using relay", domain);
+        if conf.relay_conf.relay_key.is_empty() {
+            return Err(Error::Other(
+                "please provide relay_key in conf.toml".to_string(),
+            ));
+        }
+
+        if conf.relay_conf.relay_url.is_empty() {
+            return Err(Error::Other(
+                "please provide relay_url in conf.toml".to_string(),
+            ));
+        }
+        let key = load_key_from_str(&conf.relay_conf.relay_key)?;
+
+        let relay_host = match host_from_url(&conf.relay_conf.relay_url) {
+            Ok(host) => host,
+            Err(err) => {
+                error!("invalid relay_url {}: {}", conf.relay_conf.relay_url, err);
+                return Err(Error::Other("failed to extract relay host".to_string()));
+            }
+        };
+
+        let ipv4 = resolver_picker
+            .resolve(&relay_host, None, &http)
+            .await
+            .map_err(|err| Error::Other("failed to resolve rela host: {}".to_string()))?;
+
+        let relay_client = match client_for_relay(&conf.relay_conf.relay_url, &ipv4) {
+            Ok(client) => client,
+            Err(err) => {
+                error!("failed to build relay client: {}", err);
+                return Err(Error::Other("failed to reslve relay client".to_string()));
+            }
+        };
+        let relay_resp =
+            resolve_domain_via_relay(&relay_client, &conf.relay_conf.relay_url, &key, domain)
+                .await?;
+
+        let resolved = parse_a_records(&relay_resp);
+
+        if resolved.is_empty() {
+            println!(";; no A records found for {domain}");
+        } else {
+            for ip in resolved {
+                println!("\n{domain}.\tIN\tA\t{ip}");
+            }
+        }
     } else {
-        for ip in resolved {
-            println!("\n{domain}.\tIN\tA\t{ip}");
+        let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
+        // clear_screen();
+        if resolved.is_empty() {
+            println!(";; no A records found for {domain}");
+        } else {
+            for ip in resolved {
+                println!("\n{domain}.\tIN\tA\t{ip}");
+            }
         }
     }
 

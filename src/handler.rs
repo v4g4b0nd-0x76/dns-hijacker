@@ -24,7 +24,7 @@ use crate::{
     relay::resolve_via_relay,
     resolver::{ResolverPicker, resolve_from_upstream},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol, Socket, Type};
@@ -49,7 +49,7 @@ pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
 static RELAY_CLIENTS: LazyLock<RwLock<HashMap<String, Client>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-fn host_from_url(url_str: &str) -> Result<String, Error> {
+pub fn host_from_url(url_str: &str) -> Result<String, Error> {
     let url = Url::parse(url_str).map_err(|e| Error::Config(format!("invalid relay url: {e}")))?;
     url.host_str()
         .map(|h| h.to_string())
