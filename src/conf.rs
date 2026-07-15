@@ -1,9 +1,9 @@
+use crate::errors::Error;
 use serde::Deserialize;
-use std::{path::PathBuf, sync::RwLock};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::time::{interval, Duration};
-use crate::errors::Error;
+use std::{path::PathBuf, sync::RwLock};
+use tokio::time::{Duration, interval};
 
 #[derive(Default, Deserialize)]
 pub struct Conf {
@@ -15,6 +15,17 @@ pub struct Conf {
     pub resolver_searching: ResolverSearchingConf,
     #[serde(default)]
     pub hotreload_conf: HotreloadConf,
+    #[serde(default)]
+    pub relay_conf: RelayConf,
+}
+
+#[derive(Default, Clone, Deserialize)]
+pub struct RelayConf {
+    pub enable: bool,
+    pub relay_key: String,
+    #[serde(skip)]
+    pub key : aes_gcm::Key<aes_gcm::Aes256Gcm>,
+    pub relay_url: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -66,8 +77,8 @@ pub fn load_conf(path: &PathBuf) -> Result<Conf, Error> {
     toml::from_str(&content).map_err(|err| Error::Config(err.to_string()))
 }
 
-use tracing::{error, info};
 use arc_swap::ArcSwap;
+use tracing::{error, info};
 
 pub async fn watch_conf_and_reload(
     path: PathBuf,
@@ -77,9 +88,8 @@ pub async fn watch_conf_and_reload(
     drop_list: Arc<ArcSwap<Vec<String>>>,
 ) {
     let mut tick = interval(poll_interval);
-    let mut last_mtime: Option<SystemTime> = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mut last_mtime: Option<SystemTime> =
+        std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
     loop {
         tick.tick().await;

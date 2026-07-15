@@ -1,13 +1,7 @@
 use arc_swap::ArcSwap;
+use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client,
-    conf::watch_conf_and_reload,
-    constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
-    handle_query,
-    helpers::clear_screen,
-    init_logger, load_conf, new_cache,
-    resolver::Resolver,
-    run_resolver_finder,
+    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, helpers::clear_screen, init_logger, load_conf, new_cache, relay::load_key_from_str, resolver::Resolver, run_resolver_finder
 };
 use std::{
     io,
@@ -17,8 +11,6 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
-
-use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +47,8 @@ enum Commands {
         #[arg(required = false)]
         resolver: Option<String>,
     },
+
+    GenRelayKey,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -67,9 +61,8 @@ async fn main() -> Result<(), Error> {
         Commands::CheckConf => check_conf(&cli.conf),
         Commands::ListRules => list_rules(&cli.conf),
         Commands::Resolvers => list_resolvers(&cli.conf).await,
-        Commands::Resolve { domain, resolver } => {
-            resolve(&cli.conf, &domain, resolver).await
-        }
+        Commands::GenRelayKey => gen_relay_key(&cli.conf),
+        Commands::Resolve { domain, resolver } => resolve(&cli.conf, &domain, resolver).await,
     }
 }
 
@@ -95,15 +88,20 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&drop_list),
     ));
     let http = build_http_client()?;
-    let (initial_resolvers, resolver_searching, searching_enabled) = {
+    let (initial_resolvers, resolver_searching, searching_enabled, mut relay_conf) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.resolvers.clone(),
             conf_read.resolver_searching.clone(),
             conf_read.resolver_searching.enable
                 && !conf_read.resolver_searching.resolver_source.is_empty(),
+            conf_read.relay_conf.clone(),
         )
     };
+    if relay_conf.enable {
+        relay_conf.key = load_key_from_str(&relay_conf.relay_key)?;
+    }
+    let relay_conf = Arc::new(relay_conf);
     let resolver_picker = ResolverPicker::new(initial_resolvers, http.clone()).await?;
     if searching_enabled {
         let healthy_resolvers = resolver_picker.healthy_resolvers();
@@ -149,9 +147,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let redirect_list = redirect_list.load_full();
             let drop_list = drop_list.load_full();
             let http = http.clone();
+            let relay_conf = relay_conf.clone();
             let resolver_picker = resolver_picker.clone();
             let server_socket = Arc::clone(&server_socket);
             let cache = Arc::clone(&cache);
+
             tokio::spawn(async move {
                 let _permit = permit;
                 handle_query(
@@ -163,6 +163,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     &server_socket,
                     &http,
                     &cache,
+                    &relay_conf,
                 )
                 .await;
             });

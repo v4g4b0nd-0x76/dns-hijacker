@@ -54,6 +54,11 @@ doh = true
 enable = true 
 poll_interval_ms = 100
 
+[relay_conf] # optional and used for sending request over cloud flare workers as a relay the worker.js is provided in `assets/relay_worker.js`
+enable = true
+relay_key = "generated key from `dns-hijacker gen-relay-key`"
+relay_url = "cloudflare worker url"
+
 
 ```
 
@@ -66,6 +71,8 @@ poll_interval_ms = 100
 - [x] Hot reload for config
 - [x] redirect with multiple ip
 - [x] resolve directly like dig 
+- [x] relay query to cloud flare worker
+- [x] use relay for all queries
 - [ ] add google geo ip for redirect google ips
 **Idea: give this as a comamnd entry and specify as resolve_conf.toml that define the domain/sni and where it can find ips for it to create a redirect list for the actual ips not DPI dns resolver**
 ```text

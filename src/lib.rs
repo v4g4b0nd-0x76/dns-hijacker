@@ -7,6 +7,7 @@ pub mod errors;
 pub mod handler;
 pub mod logger;
 pub mod resolver;
+pub mod relay;
 
 pub use cache::{ResponseCache, new_cache};
 pub use conf::{Conf, load_conf};
@@ -14,6 +15,7 @@ pub use errors::{DohError, Error};
 pub use handler::{bind_udp_socket, handle_query};
 pub use logger::init_logger;
 pub use resolver::{ResolverPicker, build_http_client, run_resolver_finder};
+pub use relay::{gen_relay_key};
 
 pub mod constants {
     use std::time::Duration;

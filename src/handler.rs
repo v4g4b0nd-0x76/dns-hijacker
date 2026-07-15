@@ -3,16 +3,12 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
-    cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
-    constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE},
-    dns::{
+    cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store}, conf::RelayConf, constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE}, dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
         matches_domain_pattern, parse_domain, with_txid,
-    },
-    errors::Error,
-    resolver::{ResolverPicker, resolve_from_upstream},
+    }, errors::Error, relay::resolve_via_relay, resolver::{ResolverPicker, resolve_from_upstream}
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol, Socket, Type};
@@ -43,12 +39,12 @@ pub async fn handle_query(
     server_socket: &UdpSocket,
     http: &reqwest::Client,
     cache: &ResponseCache,
+    relay_conf: &RelayConf,
 ) {
     if payload.len() < 12 {
         error!("invalid payload len");
         return;
     }
-
     let (domain, qname_end) = match parse_domain(payload, 12) {
         Some(res) => res,
         None => return,
@@ -58,7 +54,6 @@ pub async fn handle_query(
     let should_drop = drop_list
         .iter()
         .any(|pattern| matches_domain_pattern(&domain, pattern));
-
     if should_drop {
         warn!("[Dropped] {}", domain);
         if let Some(resp) = craft_nxdomain_response(payload) {
@@ -70,15 +65,12 @@ pub async fn handle_query(
     let redirect_target = redirect_list
         .iter()
         .find(|(pattern, _)| matches_domain_pattern(&domain, pattern));
-
     if let Some((_, ip_with_port)) = redirect_target {
         let ips: Vec<&str> = ip_with_port
             .split(',')
             .map(|entry| entry.split(':').next().unwrap_or(entry))
             .collect();
-
         warn!("[REDIRECT] {} -> {:?}", domain, ips);
-
         if let Some(resp) = craft_redirect_response(payload, qname_end, ips) {
             let _ = server_socket.send_to(&resp, src_addr).await;
         }
@@ -90,7 +82,6 @@ pub async fn handle_query(
         None => return,
     };
     let req_txid = [payload[0], payload[1]];
-
     if let Some(cached) = cache_lookup(cache, &cache_key) {
         debug!("[CACHE HIT] {}", domain);
         let resp = with_txid(cached, req_txid);
@@ -98,6 +89,40 @@ pub async fn handle_query(
         return;
     }
 
+    if relay_conf.enable {
+        // --- Relay path ---
+        info!("Using relay");
+        match timeout(
+            RESOLVE_TIMEOUT,
+            resolve_via_relay(http, &relay_conf.relay_url, &relay_conf.key, payload),
+        )
+        .await
+        {
+            Ok(Ok(reply_buf)) => {
+                cache_store(cache, cache_key, &reply_buf);
+                let resp = with_txid(reply_buf.to_vec(), req_txid);
+                let _ = server_socket.send_to(&resp, src_addr).await;
+            }
+            Ok(Err(err)) => {
+                error!("relay resolve failed for {}: {}", domain, err);
+                if let Some(resp) = craft_servfail_response(payload) {
+                    let _ = server_socket.send_to(&resp, src_addr).await;
+                }
+            }
+            Err(_) => {
+                error!(
+                    "relay resolve timed out for {} after {:?}",
+                    domain, RESOLVE_TIMEOUT
+                );
+                if let Some(resp) = craft_servfail_response(payload) {
+                    let _ = server_socket.send_to(&resp, src_addr).await;
+                }
+            }
+        }
+        return;
+    }
+
+    // --- Direct upstream path (existing behavior) ---
     let resolver = resolver_picker.pick();
     match timeout(
         RESOLVE_TIMEOUT,

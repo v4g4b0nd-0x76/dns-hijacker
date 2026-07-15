@@ -25,7 +25,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 arc-swap = "1.9.2"
 clap = { version = "4.6.1", features = ["derive"] }
 rand = "0.10.2"
-
+aes-gcm = "0.10"
+base64 = "0.21"
 [profile.release]
 # Size-first release build; LTO still inlines across crates for hot paths.
 opt-level = "z"
@@ -39,3 +40,6 @@ overflow-checks = false
 inherits = "release"
 # Prefer speed/inlining over minimal size when needed.
 opt-level = 3
+
+[features]
+rand_core = []

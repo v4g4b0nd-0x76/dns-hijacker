@@ -12,7 +12,7 @@ use crate::{
     cache::{
         CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
     },
-    conf::Conf,
+    conf::{Conf, RelayConf},
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
@@ -200,6 +200,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &server,
         &http,
         &cache,
+        &RelayConf::default(),
     )
     .await;
 
@@ -220,6 +221,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &server,
         &http,
         &cache,
+        &RelayConf::default(),
     )
     .await;
 
@@ -274,6 +276,7 @@ async fn integration_udp_upstream_echo() {
         &server,
         &http,
         &cache,
+        &RelayConf::default(),
     )
     .await;
 
@@ -332,7 +335,18 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &redirect_list, &drop_list, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &redirect_list,
+        &drop_list,
+        &picker,
+        &server,
+        &http,
+        &cache,
+        &RelayConf::default(),
+    )
+    .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x01, 0x01]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -342,7 +356,18 @@ async fn integration_cache_hit_skips_upstream() {
     q2[1] = 0x02;
     client.send_to(&q2, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(&buf[..len], src, &redirect_list,&drop_list, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &redirect_list,
+        &drop_list,
+        &picker,
+        &server,
+        &http,
+        &cache,
+        &RelayConf::default(),
+    )
+    .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x02, 0x02]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -367,7 +392,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         resolvers: vec![blackhole_addr.to_string()],
         ..Default::default()
     };
-        let redirect_list = Arc::new(conf.redirect_list.clone());
+    let redirect_list = Arc::new(conf.redirect_list.clone());
     let drop_list = Arc::new(conf.drop_list.clone());
 
     let picker = ResolverPicker::from_healthy(vec![create_resolver(&blackhole_addr.to_string())]);
@@ -382,7 +407,18 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
-    handle_query(&buf[..len], src, &redirect_list, &drop_list, &picker, &server, &http, &cache).await;
+    handle_query(
+        &buf[..len],
+        src,
+        &redirect_list,
+        &drop_list,
+        &picker,
+        &server,
+        &http,
+        &cache,
+        &RelayConf::default(),
+    )
+    .await;
     let elapsed = started.elapsed();
     assert!(
         elapsed >= RESOLVE_TIMEOUT && elapsed < RESOLVE_TIMEOUT + Duration::from_secs(1),
