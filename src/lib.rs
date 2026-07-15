@@ -5,15 +5,15 @@ pub mod conf;
 pub mod dns;
 pub mod errors;
 pub mod handler;
-pub mod resolver;
 pub mod logger;
+pub mod resolver;
 
-pub use cache::{new_cache, ResponseCache};
-pub use conf::{load_conf, Conf};
+pub use cache::{ResponseCache, new_cache};
+pub use conf::{Conf, load_conf};
 pub use errors::{DohError, Error};
 pub use handler::{bind_udp_socket, handle_query};
-pub use resolver::{build_http_client,run_resolver_finder, ResolverPicker};
-pub use logger::{init_logger};
+pub use logger::init_logger;
+pub use resolver::{ResolverPicker, build_http_client, run_resolver_finder};
 
 pub mod constants {
     use std::time::Duration;
@@ -30,7 +30,7 @@ pub mod constants {
     pub const CACHE_TTL_MIN: Duration = Duration::from_secs(5);
     pub const CACHE_TTL_MAX: Duration = Duration::from_secs(300);
     pub const CACHE_TTL_FALLBACK: Duration = Duration::from_secs(60);
-    pub const SEARCH_RESOLVER_INTERVAL : u64 = 15;
+    pub const SEARCH_RESOLVER_INTERVAL: u64 = 15;
 
     /// Minimal DNS query for `google.com` A record, used as a health-check probe.
     pub const DNS_PROBE_PACKET: &[u8] = &[
@@ -46,6 +46,29 @@ pub mod constants {
         0x00, 0x01, // Type: A
         0x00, 0x01, // Class: IN
     ];
+}
+pub mod helpers {
+    use std::net::IpAddr;
+use crate::Error;
+
+
+    pub fn clear_screen() {
+        print!("\x1B[2J\x1B[1;1H"); // clear screen, move cursor to top-left
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+    }
+
+    pub async fn get_public_ip(http: &reqwest::Client) -> Result<IpAddr, Error> {
+        let resp = http
+            .get("https://api.ipify.org")
+            .send()
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let text = resp.text().await.map_err(|e| Error::Other(e.to_string()))?;
+        text.trim()
+            .parse::<IpAddr>()
+            .map_err(|_| Error::Other("invalid public IP response".into()))
+    }
 }
 
 #[cfg(test)]

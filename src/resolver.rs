@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     future::Future,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::{
         Arc, LazyLock, RwLock,
@@ -22,8 +22,9 @@ use crate::{
         DNS_PROBE_PACKET, DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SEARCH_RESOLVER_INTERVAL,
         UDP_PROBE_TIMEOUT,
     },
-    dns::inject_ecs_option,
+    dns::{build_lookup_query, inject_ecs_option, parse_a_records},
     errors::{DohError, Error},
+    helpers::get_public_ip,
 };
 use tracing::{debug, error, info, warn};
 
@@ -128,10 +129,31 @@ impl ResolverPicker {
     pub fn healthy_resolvers(&self) -> Arc<RwLock<Vec<Resolver>>> {
         self.healthy_resolvers.clone()
     }
+    fn select_resolver(&self, resolver: Option<String>) -> String {
+        resolver
+            .map(|r| normalize_resolver(&r))
+            .unwrap_or_else(|| self.pick())
+    }
 
     pub fn pick(&self) -> String {
         let healthy_resolvers = self.healthy_resolvers.read().unwrap();
         healthy_resolvers[0].clone().0
+    }
+    pub async fn resolve(
+        &self,
+        domain: &str,
+        resolver: Option<String>,
+        http: &reqwest::Client,
+    ) -> Result<Vec<Ipv4Addr>, Error> {
+        let resolver = resolver
+            .map(|r| normalize_resolver(&r))
+            .unwrap_or_else(|| self.pick());
+        let public_ip = get_public_ip(http).await?;
+        let src_addr = SocketAddr::new(public_ip, 0);
+        let query = build_lookup_query(domain);
+        let (reply, _len) = resolve_from_upstream(&query, &resolver, src_addr, http).await?;
+        let ips = parse_a_records(&reply);
+        Ok(ips)
     }
 }
 
@@ -487,6 +509,23 @@ fn classify_line(line: &str, keep_ipv4: bool, keep_doh: bool) -> Option<String> 
         Err(_) => None,            // not a parseable IP or URL, skip
     }
 }
+fn normalize_resolver(resolver: &str) -> String {
+    if resolver.starts_with("https://") || resolver.starts_with("http://") {
+        return resolver.to_string();
+    }
+
+    if resolver.contains(':') {
+        resolver.to_string()
+    } else {
+        format!("{resolver}:53")
+    }
+}
+pub fn create_resolver(addr: &str) -> Resolver {
+    (addr.to_string(), Duration::from_secs(0))
+}
+pub fn resolvers_to_addrs(resolvers: &[Resolver]) -> Vec<&str> {
+    resolvers.iter().map(|(addr, _)| addr.as_str()).collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -560,7 +599,7 @@ garbage
             vec![
                 create_resolver("fast"),
                 create_resolver("old-a"),
-                create_resolver("mid")
+                create_resolver("mid"),
             ],
             3,
         );
@@ -573,7 +612,11 @@ garbage
     #[test]
     fn merge_discovered_noop_when_all_known() {
         let mut healthy = vec![create_resolver("a"), create_resolver("b")];
-        merge_discovered_into_healthy(&mut healthy, vec![create_resolver("a"), create_resolver("b")], 256);
+        merge_discovered_into_healthy(
+            &mut healthy,
+            vec![create_resolver("a"), create_resolver("b")],
+            256,
+        );
         assert_eq!(resolvers_to_addrs(&healthy), vec!["a", "b"]);
     }
 
@@ -768,11 +811,37 @@ garbage
         assert!(!guard.is_empty());
         assert!(guard.len() <= MAX_HEALTHY_RESOLVERS);
     }
-}
+    #[test]
+    fn select_resolver_uses_explicit_override_and_normalizes_port() {
+        let picker = ResolverPicker::from_healthy(vec![create_resolver("1.1.1.1:53")]);
 
-pub fn create_resolver(addr: &str) -> Resolver {
-    (addr.to_string() , Duration::from_secs(0))
-}
-pub fn resolvers_to_addrs(resolvers: &[Resolver]) -> Vec<&str> {
-    resolvers.iter().map(|(addr, _)| addr.as_str()).collect()
+        // bare IP with no port should get `:53` appended
+        assert_eq!(
+            picker.select_resolver(Some("8.8.8.8".to_string())),
+            "8.8.8.8:53"
+        );
+
+        // already has a port, left untouched
+        assert_eq!(
+            picker.select_resolver(Some("9.9.9.9:53".to_string())),
+            "9.9.9.9:53"
+        );
+
+        // DoH URL passed through unchanged
+        assert_eq!(
+            picker.select_resolver(Some("https://dns.example/dns-query".to_string())),
+            "https://dns.example/dns-query"
+        );
+    }
+
+    #[test]
+    fn select_resolver_falls_back_to_pick_when_none() {
+        let picker = ResolverPicker::from_healthy(vec![
+            create_resolver("1.1.1.1:53"),
+            create_resolver("8.8.8.8:53"),
+        ]);
+
+        // no explicit resolver given -> falls back to the picker's first (best) entry
+        assert_eq!(picker.select_resolver(None), "1.1.1.1:53");
+    }
 }

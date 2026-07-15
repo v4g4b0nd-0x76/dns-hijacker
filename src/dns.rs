@@ -1,3 +1,4 @@
+use rand::{RngExt};
 use std::net::SocketAddr;
 
 #[inline(always)]
@@ -74,11 +75,11 @@ pub fn craft_redirect_response(
     resp[7] = (ancount & 0xFF) as u8;
 
     for ip in &ips {
-        resp.extend_from_slice(&[0xC0, 0x0C]);             // name = pointer to offset 12 (query name)
+        resp.extend_from_slice(&[0xC0, 0x0C]); // name = pointer to offset 12 (query name)
         resp.extend_from_slice(&qtype);
         resp.extend_from_slice(&qclass);
         resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL = 60s
-        resp.extend_from_slice(&[0x00, 0x04]);             // RDLENGTH
+        resp.extend_from_slice(&[0x00, 0x04]); // RDLENGTH
         resp.extend_from_slice(&ip.octets());
     }
 
@@ -172,6 +173,96 @@ pub fn matches_domain_pattern(domain: &str, pattern: &str) -> bool {
     }
 
     false
+}
+
+pub fn build_lookup_query(domain: &str) -> Vec<u8> {
+    let mut packet = Vec::new();
+
+    let txid: u16 = rand::rng().random();
+    packet.extend_from_slice(&txid.to_be_bytes());
+    packet.extend_from_slice(&[0x01, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x01]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+
+    for label in domain.trim_end_matches('.').split('.') {
+        packet.push(label.len() as u8);
+        packet.extend_from_slice(label.as_bytes());
+    }
+    packet.push(0x00);
+
+    packet.extend_from_slice(&[0x00, 0x01]);
+    packet.extend_from_slice(&[0x00, 0x01]);
+
+    packet
+}
+
+use std::net::Ipv4Addr;
+
+/// Skips a DNS name at `offset`, handling both plain labels and compression pointers.
+/// Returns the offset just past the name.
+fn skip_name(buf: &[u8], offset: usize) -> Option<usize> {
+    let mut pos = offset;
+    loop {
+        if pos >= buf.len() {
+            return None;
+        }
+        let len = buf[pos];
+        if len == 0 {
+            pos += 1;
+            break;
+        } else if len & 0xC0 == 0xC0 {
+            pos += 2; // compression pointer is always exactly 2 bytes
+            break;
+        } else {
+            pos += 1 + len as usize;
+        }
+    }
+    Some(pos)
+}
+
+/// Extracts all A-record IPs from a raw DNS response
+pub fn parse_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
+    let mut ips = Vec::new();
+    if buf.len() < 12 {
+        return ips;
+    }
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+
+    let mut pos = 12;
+    for _ in 0..qdcount {
+        pos = match skip_name(buf, pos) {
+            Some(p) => p,
+            None => return ips,
+        };
+        pos += 4; // qtype + qclass
+    }
+
+    for _ in 0..ancount {
+        pos = match skip_name(buf, pos) {
+            Some(p) => p,
+            None => return ips,
+        };
+        if pos + 10 > buf.len() {
+            return ips;
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rdlength = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        let rdata_start = pos + 10;
+        if rdata_start + rdlength > buf.len() {
+            return ips;
+        }
+        if rtype == 1 && rdlength == 4 {
+            ips.push(Ipv4Addr::new(
+                buf[rdata_start], buf[rdata_start + 1],
+                buf[rdata_start + 2], buf[rdata_start + 3],
+            ));
+        }
+        pos = rdata_start + rdlength;
+    }
+    ips
 }
 
 #[inline(always)]

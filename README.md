@@ -65,7 +65,7 @@ poll_interval_ms = 100
 - [x] Add a resolver discovery service to find public resolvers(might be useful during filtering)
 - [x] Hot reload for config
 - [x] redirect with multiple ip
-- [ ] resolve directly like dig 
+- [x] resolve directly like dig 
 - [ ] add google geo ip for redirect google ips
 **Idea: give this as a comamnd entry and specify as resolve_conf.toml that define the domain/sni and where it can find ips for it to create a redirect list for the actual ips not DPI dns resolver**
 ```text

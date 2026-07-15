@@ -3,7 +3,9 @@ use dns_hijacker::{
     Error, ResolverPicker, bind_udp_socket, build_http_client,
     conf::watch_conf_and_reload,
     constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
-    handle_query, init_logger, load_conf, new_cache,
+    handle_query,
+    helpers::clear_screen,
+    init_logger, load_conf, new_cache,
     resolver::Resolver,
     run_resolver_finder,
 };
@@ -45,6 +47,14 @@ enum Commands {
     ListRules,
 
     Resolvers,
+
+    Resolve {
+        #[arg(required = true)]
+        domain: String,
+
+        #[arg(required = false)]
+        resolver: Option<String>,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -57,6 +67,9 @@ async fn main() -> Result<(), Error> {
         Commands::CheckConf => check_conf(&cli.conf),
         Commands::ListRules => list_rules(&cli.conf),
         Commands::Resolvers => list_resolvers(&cli.conf).await,
+        Commands::Resolve { domain, resolver } => {
+            resolve(&cli.conf, &domain, resolver).await
+        }
     }
 }
 
@@ -205,8 +218,19 @@ async fn list_resolvers(conf_path: &PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-fn clear_screen() {
-    print!("\x1B[2J\x1B[1;1H"); // clear screen, move cursor to top-left
-    use std::io::Write;
-    std::io::stdout().flush().unwrap();
+async fn resolve(conf_path: &PathBuf, domain: &str, resolver: Option<String>) -> Result<(), Error> {
+    let conf = load_conf(conf_path)?;
+    let http = build_http_client()?;
+    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
+    let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
+    clear_screen();
+    if resolved.is_empty() {
+        println!(";; no A records found for {domain}");
+    } else {
+        for ip in resolved {
+            println!("\n{domain}.\tIN\tA\t{ip}");
+        }
+    }
+
+    Ok(())
 }
