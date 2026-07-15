@@ -84,6 +84,9 @@ async fn main() -> Result<(), Error> {
 
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
+    let cache = Arc::new(new_cache());
+    let domain_cache = new_domain_cache();
+
     let hotreload_conf = {
         let conf_read = conf.read().unwrap();
         conf_read.hotreload_conf.clone()
@@ -102,6 +105,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&conf),
         Arc::clone(&redirect_list),
         Arc::clone(&drop_list),
+        Arc::clone(&cache)
     ));
     let http = build_http_client()?;
     let (initial_resolvers, resolver_searching, searching_enabled, mut relay_conf) = {
@@ -132,8 +136,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     }
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
-    let cache = Arc::new(new_cache());
-    let domain_cache = new_domain_cache();
     info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {

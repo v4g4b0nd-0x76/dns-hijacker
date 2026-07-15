@@ -1,3 +1,5 @@
+use crate::ResponseCache;
+use crate::cache::remove_domains_from_cache;
 use crate::errors::Error;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -86,6 +88,7 @@ pub async fn watch_conf_and_reload(
     conf: Arc<RwLock<Conf>>,
     redirect_list: Arc<ArcSwap<Vec<(String, String)>>>,
     drop_list: Arc<ArcSwap<Vec<String>>>,
+    cache:Arc<ResponseCache>
 ) {
     let mut tick = interval(poll_interval);
     let mut last_mtime: Option<SystemTime> =
@@ -109,9 +112,13 @@ pub async fn watch_conf_and_reload(
         match load_conf(&path) {
             Ok(new_conf) => {
                 redirect_list.store(Arc::new(new_conf.redirect_list.clone()));
-                drop_list.store(Arc::new(new_conf.drop_list.clone()));
+                let drop_list_clone = new_conf.drop_list.clone();
+                remove_domains_from_cache(&cache, &drop_list_clone);
+                drop_list.store(Arc::new(drop_list_clone));
                 *conf.write().unwrap() = new_conf;
+
                 info!("config reloaded successfully");
+        
             }
             Err(err) => error!("failed to reload conf.toml, keeping old config: {}", err),
         }

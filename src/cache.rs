@@ -9,7 +9,7 @@ use lru::LruCache;
 
 use crate::{
     constants::{CACHE_CAPACITY, CACHE_TTL_FALLBACK, CACHE_TTL_MAX, CACHE_TTL_MIN},
-    dns::{min_answer_ttl, parse_domain},
+    dns::{matches_domain_pattern, min_answer_ttl, parse_domain},
 };
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -39,7 +39,23 @@ pub fn cache_key_from_query(payload: &[u8]) -> Option<CacheKey> {
     let qtype = u16::from_be_bytes([payload[qname_end], payload[qname_end + 1]]);
     Some(CacheKey { name, qtype })
 }
+pub fn remove_domains_from_cache(cache: &ResponseCache, patterns: &[String]) {
+    let mut cache = cache.lock().unwrap();
 
+    let keys: Vec<CacheKey> = cache
+        .iter()
+        .filter(|(key, _)| {
+            patterns
+                .iter()
+                .any(|pattern| matches_domain_pattern(&key.name, pattern))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    for key in keys {
+        cache.pop(&key);
+    }
+}
 pub fn clamp_cache_ttl(ttl_secs: u32) -> Duration {
     let ttl = Duration::from_secs(u64::from(ttl_secs));
     if ttl < CACHE_TTL_MIN {
