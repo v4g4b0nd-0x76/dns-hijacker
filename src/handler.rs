@@ -1,12 +1,28 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, LazyLock},
+};
 
+use reqwest::Client;
+use std::collections::HashMap;
+use std::sync::RwLock;
 use tokio::{net::UdpSocket, time::timeout};
+use url::Url;
 
 use crate::{
-    cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store}, conf::RelayConf, constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE}, dns::{
+    cache::{
+        DomainCache, ResponseCache, cache_key_from_query, cache_lookup, cache_store, cache_url_ip,
+        get_cached_domain,
+    },
+    conf::RelayConf,
+    constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE},
+    dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
         matches_domain_pattern, parse_domain, with_txid,
-    }, errors::Error, relay::resolve_via_relay, resolver::{ResolverPicker, resolve_from_upstream}
+    },
+    errors::Error,
+    relay::resolve_via_relay,
+    resolver::{ResolverPicker, resolve_from_upstream},
 };
 use tracing::{debug, error, info, warn};
 
@@ -30,6 +46,37 @@ pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
     Ok(UdpSocket::from_std(socket.into())?)
 }
 
+static RELAY_CLIENTS: LazyLock<RwLock<HashMap<String, Client>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn host_from_url(url_str: &str) -> Result<String, Error> {
+    let url = Url::parse(url_str).map_err(|e| Error::Config(format!("invalid relay url: {e}")))?;
+    url.host_str()
+        .map(|h| h.to_string())
+        .ok_or_else(|| Error::Config("relay url has no host".into()))
+}
+
+pub fn client_for_relay(worker_url: &str, ipv4: &[Ipv4Addr]) -> Result<Client, Error> {
+    let host = host_from_url(worker_url)?;
+    let ip = *ipv4
+        .first()
+        .ok_or_else(|| Error::Config("no resolved IPs for relay".into()))?;
+    let key = format!("{host}|{ip}");
+
+    if let Some(client) = RELAY_CLIENTS.read().unwrap().get(&key) {
+        return Ok(client.clone());
+    }
+
+    let addr = SocketAddr::new(IpAddr::V4(ip), 443);
+    let client = Client::builder()
+        .resolve(&host, addr) // pins this hostname -> IP, bypassing OS DNS entirely
+        .build()
+        .map_err(|e| Error::Config(e.to_string()))?;
+
+    RELAY_CLIENTS.write().unwrap().insert(key, client.clone());
+    Ok(client)
+}
+
 pub async fn handle_query(
     payload: &[u8],
     src_addr: SocketAddr,
@@ -40,6 +87,7 @@ pub async fn handle_query(
     http: &reqwest::Client,
     cache: &ResponseCache,
     relay_conf: &RelayConf,
+    domain_cache: &DomainCache,
 ) {
     if payload.len() < 12 {
         error!("invalid payload len");
@@ -90,17 +138,69 @@ pub async fn handle_query(
     }
 
     if relay_conf.enable {
-        // --- Relay path ---
-        info!("Using relay");
+        let relay_host = match host_from_url(&relay_conf.relay_url) {
+            Ok(host) => host,
+            Err(err) => {
+                error!("invalid relay_url {}: {}", relay_conf.relay_url, err);
+                if let Some(resp) = craft_servfail_response(payload) {
+                    let _ = server_socket.send_to(&resp, src_addr).await;
+                }
+                return;
+            }
+        };
+        let ipv4 = match get_cached_domain(domain_cache, &relay_host) {
+            Some(ipv4) => {
+                ipv4
+            }
+            None => match resolver_picker.resolve(&relay_host.clone(), None, http).await {
+                Ok(ipv4) => {
+
+                    if ipv4.is_empty() {
+                        error!("failed to resolve relay host {}", relay_host);
+                        if let Some(resp) = craft_servfail_response(payload) {
+                            let _ = server_socket.send_to(&resp, src_addr).await;
+                        }
+                    }
+                    cache_url_ip(domain_cache, &relay_host, ipv4.clone());
+                    ipv4
+                }
+                Err(err) => {
+                    error!(
+                        "failed to resolve relay host {}: {}",
+                        relay_host, err
+                    );
+                    if let Some(resp) = craft_servfail_response(payload) {
+                        let _ = server_socket.send_to(&resp, src_addr).await;
+                    }
+                    return;
+                }
+            },
+        };
+
+        let relay_client = match client_for_relay(&relay_conf.relay_url, &ipv4) {
+            Ok(client) => client,
+            Err(err) => {
+                error!("failed to build relay client: {}", err);
+                if let Some(resp) = craft_servfail_response(payload) {
+                    let _ = server_socket.send_to(&resp, src_addr).await;
+                }
+                return;
+            }
+        };
         match timeout(
             RESOLVE_TIMEOUT,
-            resolve_via_relay(http, &relay_conf.relay_url, &relay_conf.key, payload),
+            resolve_via_relay(
+                &relay_client,
+                &relay_conf.relay_url,
+                &relay_conf.key,
+                payload,
+            ),
         )
         .await
         {
             Ok(Ok(reply_buf)) => {
                 cache_store(cache, cache_key, &reply_buf);
-                let resp = with_txid(reply_buf.to_vec(), req_txid);
+                let resp = with_txid(reply_buf, req_txid);
                 let _ = server_socket.send_to(&resp, src_addr).await;
             }
             Ok(Err(err)) => {
@@ -122,7 +222,6 @@ pub async fn handle_query(
         return;
     }
 
-    // --- Direct upstream path (existing behavior) ---
     let resolver = resolver_picker.pick();
     match timeout(
         RESOLVE_TIMEOUT,

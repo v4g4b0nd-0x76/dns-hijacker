@@ -1,6 +1,7 @@
 use std::{
+    net::Ipv4Addr,
     num::NonZeroUsize,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -78,4 +79,30 @@ pub fn cache_store(cache: &ResponseCache, key: CacheKey, packet: &[u8]) {
             },
         );
     }
+}
+
+pub type DomainCache = Mutex<LruCache<String, Vec<Ipv4Addr>>>;
+
+pub fn new_domain_cache() -> Arc<DomainCache> {
+    Arc::new(Mutex::new(LruCache::new(
+        NonZeroUsize::new(CACHE_CAPACITY).expect("cache capacity > 0"),
+    )))
+}
+
+pub fn cache_url_ip(cache: &DomainCache, domain: &str, ipv4: Vec<Ipv4Addr>) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.put(domain.to_string(), ipv4);
+    }
+}
+
+pub fn get_cached_domain(cache: &DomainCache, domain: &str) -> Option<Vec<Ipv4Addr>> {
+    match cache.lock() {
+        Ok(mut guard) => {
+            if let Some(cached) = guard.get(domain) {
+                return Some(cached.clone());
+            }
+        }
+        _ => return None,
+    }
+    None
 }

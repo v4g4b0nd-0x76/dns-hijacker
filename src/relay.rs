@@ -4,7 +4,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use std::path::PathBuf;
+use std::{net::Ipv4Addr, path::PathBuf};
 
 pub fn gen_relay_key(_conf_path: &PathBuf) -> Result<(), Error> {
     let key = Aes256Gcm::generate_key(OsRng);
@@ -46,10 +46,9 @@ pub fn load_key_from_str(key_b64: &str) -> Result<Key<Aes256Gcm>, Error> {
     }
     Ok(*Key::<Aes256Gcm>::from_slice(&bytes))
 }
-
 pub async fn resolve_via_relay(
     http: &reqwest::Client,
-    worker_url: &str, 
+    worker_url: &str,
     key: &Key<Aes256Gcm>,
     dns_query: &[u8],
 ) -> Result<Vec<u8>, Error> {
@@ -60,7 +59,9 @@ pub async fn resolve_via_relay(
         .send()
         .await
         .map_err(|e| Error::Config(e.to_string()))?;
-
-    let body = response.bytes().await.map_err(|e| Error::Config(e.to_string()))?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| Error::Config(e.to_string()))?;
     decode_from_relay(key, &body).ok_or_else(|| Error::Config("decrypt failed".into()))
 }

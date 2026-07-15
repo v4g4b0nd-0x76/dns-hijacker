@@ -148,7 +148,10 @@ impl ResolverPicker {
         let resolver = resolver
             .map(|r| normalize_resolver(&r))
             .unwrap_or_else(|| self.pick());
-        let public_ip = get_public_ip(http).await?;
+        let public_ip = get_public_ip(http)
+            .await
+            .unwrap_or(IpAddr::V4(Ipv4Addr::new(185, 143, 233, 5))); // this ip is for iran so its a
+                                                                     // close fallback
         let src_addr = SocketAddr::new(public_ip, 0);
         let query = build_lookup_query(domain);
         let (reply, _len) = resolve_from_upstream(&query, &resolver, src_addr, http).await?;

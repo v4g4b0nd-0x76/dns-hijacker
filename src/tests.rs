@@ -10,7 +10,7 @@ use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
     cache::{
-        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
+        CacheKey, DomainCache, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl
     },
     conf::{Conf, RelayConf},
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
@@ -27,6 +27,13 @@ fn empty_cache() -> ResponseCache {
         NonZeroUsize::new(16).expect("cache capacity"),
     ))
 }
+fn empty_domain_cache() -> DomainCache {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(16).expect("cache capacity"),
+    ))
+}
+
+
 
 fn mock_query_google() -> &'static [u8] {
     DNS_PROBE_PACKET
@@ -171,6 +178,7 @@ async fn integration_redirect_and_drop_over_udp() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
+    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec!["*.example.com".into()],
@@ -201,6 +209,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
 
@@ -222,6 +231,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
 
@@ -246,6 +256,7 @@ async fn integration_udp_upstream_echo() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
+    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec![],
@@ -277,6 +288,7 @@ async fn integration_udp_upstream_echo() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
 
@@ -312,6 +324,7 @@ async fn integration_cache_hit_skips_upstream() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
+    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec![],
@@ -345,6 +358,7 @@ async fn integration_cache_hit_skips_upstream() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
@@ -366,6 +380,7 @@ async fn integration_cache_hit_skips_upstream() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
@@ -385,6 +400,7 @@ async fn integration_resolve_timeout_returns_servfail() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
+    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec![],
@@ -417,6 +433,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         &http,
         &cache,
         &RelayConf::default(),
+        &domain_cache
     )
     .await;
     let elapsed = started.elapsed();

@@ -73,6 +73,7 @@ relay_url = "cloudflare worker url"
 - [x] resolve directly like dig 
 - [x] relay query to cloud flare worker
 - [x] use relay for all queries
+- [ ] add relay for resolve
 - [ ] add google geo ip for redirect google ips
 **Idea: give this as a comamnd entry and specify as resolve_conf.toml that define the domain/sni and where it can find ips for it to create a redirect list for the actual ips not DPI dns resolver**
 ```text

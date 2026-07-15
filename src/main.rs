@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, helpers::clear_screen, init_logger, load_conf, new_cache, relay::load_key_from_str, resolver::Resolver, run_resolver_finder
+    Error, ResolverPicker, bind_udp_socket, build_http_client, cache::new_domain_cache, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, helpers::clear_screen, init_logger, load_conf, new_cache, relay::load_key_from_str, resolver::Resolver, run_resolver_finder
 };
 use std::{
     io,
@@ -117,6 +117,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
     let cache = Arc::new(new_cache());
+    let domain_cache = new_domain_cache();
     info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
@@ -151,7 +152,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let resolver_picker = resolver_picker.clone();
             let server_socket = Arc::clone(&server_socket);
             let cache = Arc::clone(&cache);
-
+            let domain_cache = Arc::clone(&domain_cache);
+            // TODO: refactor this part to pass the parameters base on usage
             tokio::spawn(async move {
                 let _permit = permit;
                 handle_query(
@@ -164,6 +166,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     &http,
                     &cache,
                     &relay_conf,
+                    &domain_cache
                 )
                 .await;
             });
