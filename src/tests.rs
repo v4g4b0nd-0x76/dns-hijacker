@@ -5,20 +5,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aes_gcm::{Aes256Gcm, KeyInit, aead::OsRng};
 use lru::LruCache;
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
     cache::{
-        CacheKey, DomainCache, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl
+        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store,
+        clamp_cache_ttl,
     },
-    conf::{Conf, RelayConf},
+    conf::Conf,
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
         inject_ecs_option, matches_domain_pattern, min_answer_ttl, parse_domain, with_txid,
     },
-    handler::handle_query,
+    handler::{HandleQueryParams, handle_query},
+    relay::{RelayInstance, RelayPicker},
     resolver::{ResolverPicker, create_resolver},
 };
 
@@ -27,13 +30,6 @@ fn empty_cache() -> ResponseCache {
         NonZeroUsize::new(16).expect("cache capacity"),
     ))
 }
-fn empty_domain_cache() -> DomainCache {
-    Mutex::new(LruCache::new(
-        NonZeroUsize::new(16).expect("cache capacity"),
-    ))
-}
-
-
 
 fn mock_query_google() -> &'static [u8] {
     DNS_PROBE_PACKET
@@ -52,6 +48,33 @@ fn mock_query_blocked_example() -> Vec<u8> {
         b'o', b'c', b'k', b'e', b'd', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c',
         b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
     ]
+}
+
+/// Small wrapper around `handle_query` that builds the `HandleQueryParams`
+/// struct for tests that don't exercise the relay path (relay_picker: None),
+/// so call sites below don't repeat the struct literal every time.
+async fn call_handle_query(
+    payload: &[u8],
+    src_addr: SocketAddr,
+    redirect_list: &Arc<Vec<(String, String)>>,
+    drop_list: &Arc<Vec<String>>,
+    resolver_picker: &ResolverPicker,
+    server_socket: &UdpSocket,
+    http: &reqwest::Client,
+    cache: &ResponseCache,
+) {
+    let params = HandleQueryParams {
+        payload,
+        src_addr,
+        redirect_list,
+        drop_list,
+        resolver_picker,
+        server_socket,
+        http,
+        cache,
+        relay_picker: None,
+    };
+    handle_query(&params).await;
 }
 
 #[test]
@@ -103,7 +126,7 @@ fn craft_redirect_appends_a_record() {
     assert_eq!(resp[7], 2);
 
     assert_eq!(&resp[resp.len() - 4..], &[192, 168, 1, 2]);
-    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]); // RDLENGTH = 4
+    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]); 
 
     let record_len = 16;
     let first_record_start = resp.len() - (record_len * 2);
@@ -178,7 +201,6 @@ async fn integration_redirect_and_drop_over_udp() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
-    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec!["*.example.com".into()],
@@ -199,7 +221,7 @@ async fn integration_redirect_and_drop_over_udp() {
     client.send_to(&redirect_query, server_addr).await.unwrap();
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &Arc::new(conf.redirect_list),
@@ -208,8 +230,6 @@ async fn integration_redirect_and_drop_over_udp() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
 
@@ -221,7 +241,7 @@ async fn integration_redirect_and_drop_over_udp() {
     let drop_query = mock_query_blocked_example();
     client.send_to(&drop_query, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &redirect_list,
@@ -230,8 +250,6 @@ async fn integration_redirect_and_drop_over_udp() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
 
@@ -256,7 +274,6 @@ async fn integration_udp_upstream_echo() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
-    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec![],
@@ -278,7 +295,7 @@ async fn integration_udp_upstream_echo() {
 
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &redirect_list,
@@ -287,8 +304,6 @@ async fn integration_udp_upstream_echo() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
 
@@ -324,8 +339,6 @@ async fn integration_cache_hit_skips_upstream() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
-    let domain_cache = empty_domain_cache();
-
     let conf = Conf {
         drop_list: vec![],
         redirect_list: vec![],
@@ -348,7 +361,7 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &redirect_list,
@@ -357,8 +370,6 @@ async fn integration_cache_hit_skips_upstream() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
@@ -370,7 +381,7 @@ async fn integration_cache_hit_skips_upstream() {
     q2[1] = 0x02;
     client.send_to(&q2, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &redirect_list,
@@ -379,8 +390,6 @@ async fn integration_cache_hit_skips_upstream() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
@@ -400,7 +409,6 @@ async fn integration_resolve_timeout_returns_servfail() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server.local_addr().unwrap();
     let cache = empty_cache();
-    let domain_cache = empty_domain_cache();
 
     let conf = Conf {
         drop_list: vec![],
@@ -423,7 +431,7 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
-    handle_query(
+    call_handle_query(
         &buf[..len],
         src,
         &redirect_list,
@@ -432,8 +440,6 @@ async fn integration_resolve_timeout_returns_servfail() {
         &server,
         &http,
         &cache,
-        &RelayConf::default(),
-        &domain_cache
     )
     .await;
     let elapsed = started.elapsed();
@@ -448,4 +454,74 @@ async fn integration_resolve_timeout_returns_servfail() {
         .unwrap();
     assert_eq!(resp_len, query.len());
     assert_eq!(buf[3], 0x82);
+}
+
+// --- RelayPicker tests ---
+//
+// These use `RelayInstance::for_test` / `RelayPicker::from_instances`
+// (test-only constructors) rather than `RelayPicker::new`, since the real
+// constructor performs network resolution per instance and isn't suitable
+// for unit tests. This lets us test the round-robin selection logic and
+// the empty-instances guard in isolation.
+
+fn test_key() -> aes_gcm::Key<Aes256Gcm> {
+    Aes256Gcm::generate_key(OsRng)
+}
+
+#[test]
+fn relay_picker_round_robins_across_instances() {
+    let instances = vec![
+        RelayInstance::for_test("https://relay-a.example.workers.dev", test_key()),
+        RelayInstance::for_test("https://relay-b.example.workers.dev", test_key()),
+        RelayInstance::for_test("https://relay-c.example.workers.dev", test_key()),
+    ];
+    let picker = RelayPicker::from_instances(instances);
+
+    let urls: Vec<&str> = (0..6).map(|_| picker.pick().url()).collect();
+
+    // Expect a clean repeating cycle over the 3 instances, in order.
+    assert_eq!(
+        urls,
+        vec![
+            "https://relay-a.example.workers.dev",
+            "https://relay-b.example.workers.dev",
+            "https://relay-c.example.workers.dev",
+            "https://relay-a.example.workers.dev",
+            "https://relay-b.example.workers.dev",
+            "https://relay-c.example.workers.dev",
+        ]
+    );
+}
+
+#[test]
+fn relay_picker_single_instance_always_returns_it() {
+    let instances = vec![RelayInstance::for_test(
+        "https://only.example.workers.dev",
+        test_key(),
+    )];
+    let picker = RelayPicker::from_instances(instances);
+
+    for _ in 0..5 {
+        assert_eq!(picker.pick().url(), "https://only.example.workers.dev");
+    }
+}
+
+#[tokio::test]
+async fn relay_picker_new_rejects_empty_instances() {
+    // RelayPicker::new checks for an empty instance list before attempting
+    // any network resolution, so this should fail fast without needing a
+    // reachable resolver or relay host.
+    let conf = crate::conf::RelayConf {
+        enable: true,
+        relay_instances: vec![],
+        ..Default::default()
+    };
+    let picker = ResolverPicker::from_healthy(vec![create_resolver("127.0.0.1:9")]);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+
+    let result = RelayPicker::new(&conf, &picker, &http).await;
+    assert!(result.is_err());
 }

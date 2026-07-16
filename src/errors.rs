@@ -12,7 +12,8 @@ pub enum Error {
     UpstreamUnreachable,
     NoHealthyResolvers,
     ResolveTimeout,
-    Other(String)
+    Other(String),
+    RelayErr(String)
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ impl fmt::Display for Error {
             }
             Self::ResolveTimeout => write!(f, "resolve timed out after {RESOLVE_TIMEOUT:?}"),
             Error::Other(err) => write!(f , "Error: {err:?}"),
+            Error::RelayErr(err) => write!(f, "Relay error: {err:?}"),
         }
     }
 }

@@ -129,6 +129,7 @@ impl ResolverPicker {
     pub fn healthy_resolvers(&self) -> Arc<RwLock<Vec<Resolver>>> {
         self.healthy_resolvers.clone()
     }
+    #[cfg(test)]
     fn select_resolver(&self, resolver: Option<String>) -> String {
         resolver
             .map(|r| normalize_resolver(&r))

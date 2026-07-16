@@ -24,9 +24,13 @@ pub struct Conf {
 #[derive(Default, Clone, Deserialize)]
 pub struct RelayConf {
     pub enable: bool,
+    pub resolve_manual: bool,
+    pub relay_instances: Vec<Relay>,
+}
+
+#[derive(Default, Clone, Deserialize)]
+pub struct Relay {
     pub relay_key: String,
-    #[serde(skip)]
-    pub key : aes_gcm::Key<aes_gcm::Aes256Gcm>,
     pub relay_url: String,
 }
 
@@ -88,7 +92,7 @@ pub async fn watch_conf_and_reload(
     conf: Arc<RwLock<Conf>>,
     redirect_list: Arc<ArcSwap<Vec<(String, String)>>>,
     drop_list: Arc<ArcSwap<Vec<String>>>,
-    cache:Arc<ResponseCache>
+    cache: Arc<ResponseCache>,
 ) {
     let mut tick = interval(poll_interval);
     let mut last_mtime: Option<SystemTime> =
@@ -118,7 +122,6 @@ pub async fn watch_conf_and_reload(
                 *conf.write().unwrap() = new_conf;
 
                 info!("config reloaded successfully");
-        
             }
             Err(err) => error!("failed to reload conf.toml, keeping old config: {}", err),
         }
