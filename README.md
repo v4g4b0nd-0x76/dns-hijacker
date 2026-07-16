@@ -1,7 +1,19 @@
-# Dns Hijacker
+# dns-hijacker
 
-Simple DNS hijacker to run on servers or localhost to manage which IPs your system resolves.
-Personally used to redirect blacklisted sites to an unknown destination.
+A small DNS server, written in Rust, meant to run on a local machine or a server, that lets you control how specific domains resolve. It was built for personal use — mainly redirecting or dropping specific domains — and is intentionally simple rather than a full-featured DNS resolver.
+
+This isn't a polished product; it's a personal tool shared as-is. The notes below describe what it does and how to configure it, based on the project's README and the relay feature discussed during its development.
+
+## What it does
+
+It binds to UDP port 53 and, for each incoming query:
+
+1. Checks a **drop list** — if the domain matches, it replies with NXDOMAIN instead of resolving anything.
+2. Checks a **redirect list** — if the domain matches a pattern, it replies with a chosen IP address directly, skipping real resolution entirely.
+3. Checks an in-memory **LRU cache** — if a recent answer for this exact query is cached, it's served immediately (with the transaction ID rewritten to match the new request), avoiding a repeat lookup.
+4. Otherwise, it resolves the domain either through a normal upstream resolver (DoH endpoint or plain UDP resolver) or, if configured, through a **relay** — an encrypted tunnel to a Cloudflare Worker that performs the actual DNS-over-HTTPS lookup on your behalf.
+
+The drop/redirect lists exist for basic personal filtering or DNS-based hijacking of specific domains. The relay path exists as a way to get real answers back even when a local network or ISP is tampering with DNS traffic on the wire, since the query never appears as plaintext DNS at any point.
 
 ## Build
 
@@ -13,83 +25,80 @@ Personally used to redirect blacklisted sites to an unknown destination.
 make test
 ```
 
-## Run as a service
+Since it needs to bind to port 53, it needs to run with elevated privileges. Either run it with `sudo`, or grant the capability directly so it doesn't need to run as root:
 
-See [assets/SERVICES.md](assets/SERVICES.md) for systemd (Linux) and launchd (macOS) install steps.
-Unit files live in `assets/dns_hijacker.service` and `assets/com.dns-hijacker.plist`.
+```bash
+sudo setcap cap_net_bind_service=+ep PATH_TO_BINARY
+```
 
-## Sample config
+## Running as a service
+
+There are systemd (Linux) and launchd (macOS) setup notes in `assets/SERVICES.md`, with unit files at `assets/dns_hijacker.service` and `assets/com.dns-hijacker.plist`.
+
+## Config format
+
+The base config controls the drop list, redirect list, and which upstream resolvers to use:
 
 ```toml
-# domain that you want to block/resolve nothing
+# domains you want to block (resolve to nothing / NXDOMAIN)
 drop_list = [
     "google.com",
     "*.example.com",
 ]
-# domains that you want to be resolved with your prefered ip(simple solotion for hijacking or layer 4/7 filter bypass)
+
+# domains you want resolved to a specific IP instead of their real answer
 redirect_list = [
-    "google.com:1.1.1.1,2.2.2.2",
     "*.test.com:192.168.1.1",
 ]
 
-# the public known resolvers you want to use normally
+# public resolvers to use for everything else
 resolvers = [
     "https://cloudflare-dns.com/dns-query",
     "8.8.8.8:53",
     "1.1.1.1:53",
 ]
+```
 
-# this section is optional and you can skip it 
+Both `drop_list` and `redirect_list` support wildcard patterns (`*.example.com` matches both `example.com` and any subdomain). `resolvers` can mix DoH URLs and plain `ip:port` UDP resolvers.
+
+There's a built-in LRU cache, so once a name has been resolved once, repeat queries for it are served from memory rather than re-querying a resolver each time.
+### resolver searching
+If you want to fetch resolvers from open source sources like github and test them concurrently set this config
+```toml 
 [resolver_searching]
-enable = true # set false if you want to not have it 
+enable = false
 resolver_source = [
-     "https://public-dns.info/nameservers-all.txt",
-     "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt"
+ "https://public-dns.info/nameservers-all.txt",
+ "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt"
 ]
 refresh_interval = 30
-ipv4 = true 
+ipv4 = true
 doh = true
 
-[hotreload_conf]
-enable = true 
-poll_interval_ms = 100
 
-[relay_conf] # optional and used for sending request over cloud flare workers as a relay the worker.js is provided in `assets/relay_worker.js`
+```
+
+### Relay config
+
+If you want DNS queries to go through an encrypted relay (a Cloudflare Worker acting as a DoH proxy) instead of querying resolvers directly — useful if something on the network path is tampering with or blocking plain DNS — there's a `relay_conf` section:
+
+```toml
+[relay_conf]
 enable = true
-relay_key = "generated key from `dns-hijacker gen-relay-key`"
-relay_url = "cloudflare worker url"
 
-
+[[relay_conf.relay_instances]]
+relay_key = "<base64 AES-256-GCM key>"
+relay_url = "https://your-worker.your-subdomain.workers.dev/"
 ```
 
-**There is a simple LRU cache implemented that there is no need for sending Qname request to resolvers after first resolve**
-**There is also option for using cloudflare worker as relay to bypass the dns hijacking by DPI**
+`[[relay_conf.relay_instances]]` can be repeated to configure more than one relay worker; the tool round-robins across them. Each query is AES-256-GCM encrypted, sent as a plain HTTPS POST to the worker, which decrypts it, performs the actual DoH lookup, encrypts the reply, and sends it back — so the traffic looks like an ordinary HTTPS API call rather than DNS traffic.
 
-## Bench
-you can benchmark resolving random domain concurrently to prevent cache and have the success - fail rate + avg - max response time
-```bash 
-➜ ./scripts/bench_a_record.sh
-Requests/s:    70 | Success:     597 | Failed:     0 | Avg: 170 ms | Max: 521 ms | Success:100%
-Requests/s:  -110 | Success:     487 | Failed:     0 | Avg: 171 ms | Max: 353 ms | Success:100%
+Relay keys are generated locally (never sent anywhere), and the same key needs to be set as a secret on the Worker side so it can decrypt what the client sends.
 
-```
+## CLI
 
-## TODO 
-- [x] Add TTL to LRU cache 
-- [x] Remove the blocking `println` and replace with tracing
-- [x] Add a resolver discovery service to find public resolvers(might be useful during filtering)
-- [x] Hot reload for config
-- [x] redirect with multiple ip
-- [x] resolve directly like dig 
-- [x] relay query to cloud flare worker
-- [x] use relay for all queries
-- [x] add relay for resolve
-- [ ] add google geo ip for redirect google ips
-**Idea: give this as a comamnd entry and specify as resolve_conf.toml that define the domain/sni and where it can find ips for it to create a redirect list for the actual ips not DPI dns resolver**
-```text
-https://www.gstatic.com/ipranges/goog.json
-https://www.gstatic.com/ipranges/cloud.json
-# using this code written by me for finding google ips 
-https://github.com/therealaleph/MasterHttpRelayVPN-RUST/blob/main/src/scan_ips.rs
-```
-- [ ] For uncached domains queue all request and dont resolve multiple time resolve one time and cache them repond all of them with 1 IO reqeust
+Aside from running the server, there are a couple of standalone commands for setup and troubleshooting — generating a relay key, and resolving a single domain (optionally through the relay) without running the full server. Exact flag names may vary by version; check `--help` on your build for the authoritative list.
+
+## A note on scope
+
+This is a simple, personal-use tool, not a hardened production resolver — there's no built-in DNSSEC validation, and the filtering (drop/redirect lists) is pattern-based rather than anything more sophisticated. The README's own TODO list reflects this: replacing blocking `println!` calls with proper tracing, and adding resolver auto-discovery, are both still open.
