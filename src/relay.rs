@@ -88,7 +88,6 @@ pub async fn resolve_domain_via_relay(
 ) -> Result<Vec<Ipv4Addr>, Error> {
     let query = build_lookup_query(domain);
     let encrypted = encode_for_relay(key, &query);
-
     let response = http
         .post(worker_url)
         .body(encrypted)
@@ -96,14 +95,21 @@ pub async fn resolve_domain_via_relay(
         .await
         .map_err(|e| Error::Config(e.to_string()))?;
 
+    let status = response.status();
     let body = response
         .bytes()
         .await
         .map_err(|e| Error::Config(e.to_string()))?;
 
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body);
+        return Err(Error::Config(format!(
+            "relay returned {status} for {domain}: {text}"
+        )));
+    }
+
     let reply =
         decode_from_relay(key, &body).ok_or_else(|| Error::Config("decrypt failed".into()))?;
-
     let ips = parse_a_records(&reply);
     if ips.is_empty() {
         return Err(Error::Config(format!("no A records for {domain}")));
