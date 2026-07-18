@@ -25,13 +25,27 @@ pub struct Conf {
 pub struct RelayConf {
     pub enable: bool,
     pub resolve_manual: bool,
+    #[serde(default = "default_relay_timeout_sec")]
+    pub relay_timeout_sec: u64,
     pub relay_instances: Vec<Relay>,
+}
+fn default_relay_timeout_sec() -> u64 {
+    5
+}
+
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayTransport {
+    #[default]
+    Direct,
+    GoogleChained,
 }
 
 #[derive(Default, Clone, Deserialize)]
 pub struct Relay {
     pub relay_key: String,
     pub relay_url: String,
+    pub transport: RelayTransport,
 }
 
 #[derive(Clone, Deserialize)]

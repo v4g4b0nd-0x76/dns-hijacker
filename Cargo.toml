@@ -13,7 +13,7 @@ tokio = { version = "1.52.3", default-features = false, features = [
     "time",
 ] }
 toml = { version = "1.1.2", default-features = false, features = ["parse", "serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 lru = "0.12"
 socket2 = "0.5"
 tracing = "0.1.44"
@@ -28,6 +28,8 @@ rand = "0.10.2"
 aes-gcm = "0.10"
 base64 = "0.21"
 url = "2.5.8"
+hmac = "0.12"
+sha2 = "0.10"
 [profile.release]
 # Size-first release build; LTO still inlines across crates for hot paths.
 opt-level = "z"

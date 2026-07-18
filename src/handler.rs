@@ -3,14 +3,14 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
-    cache::{ ResponseCache, cache_key_from_query, cache_lookup, cache_store},
+    cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
     constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
         matches_domain_pattern, parse_domain, with_txid,
     },
     errors::Error,
-    relay::{RelayPicker, resolve_via_relay},
+    relay::{RelayPicker},
     resolver::{ResolverPicker, resolve_from_upstream},
 };
 use tracing::{debug, error, warn};
@@ -138,12 +138,9 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
     }
     let resolve_result: Result<Vec<u8>, Error> = if let Some(relay_picker) = relay_picker {
         let instance = relay_picker.pick();
-        timeout(
-            RESOLVE_TIMEOUT,
-            resolve_via_relay(instance.client(), instance.url(), instance.key(), payload),
-        )
-        .await
-        .unwrap_or(Err(Error::ResolveTimeout))
+        timeout(relay_picker.timeout_duration(), instance.resolve(&domain, payload))
+            .await
+            .unwrap_or(Err(Error::ResolveTimeout))
     } else {
         let resolver = resolver_picker.pick();
         timeout(

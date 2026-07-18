@@ -238,8 +238,6 @@ async fn resolve(
     let http = build_http_client()?;
     let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
     if relay {
-        info!("resolving {} using relay", domain);
-
         if conf.relay_conf.relay_instances.is_empty() {
             return Err(Error::Other(
                 "please define relay instances for using relay as resolver".to_string(),
