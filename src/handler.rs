@@ -80,6 +80,7 @@ pub struct HandleQueryParams<'a> {
     pub http: &'a reqwest::Client,
     pub cache: &'a ResponseCache,
     pub relay_picker: Option<&'a RelayPicker>,
+    pub socket: &'a Arc<UdpSocket>
 }
 
 pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
@@ -93,6 +94,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         http,
         cache,
         relay_picker,
+        socket
     } = *params;
 
     if payload.len() < 12 {
@@ -145,7 +147,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         let resolver = resolver_picker.pick();
         timeout(
             RESOLVE_TIMEOUT,
-            resolve_from_upstream(payload, &resolver, src_addr, http),
+            resolve_from_upstream(payload, &resolver, src_addr, http,socket),
         )
         .await
         .unwrap_or(Err(Error::ResolveTimeout))

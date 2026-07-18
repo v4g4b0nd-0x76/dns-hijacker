@@ -12,6 +12,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::net::UdpSocket;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -226,6 +227,7 @@ impl RelayInstance {
         resolver_picker: &ResolverPicker,
         http: &reqwest::Client,
         resolve_ipv4: bool,
+        socket: &UdpSocket
     ) -> Result<Self, Error> {
         let relay_host = host_from_url(&conf.relay_url).map_err(|err| {
             let msg = format!("invalid relay_url {}: {}", conf.relay_url, err);
@@ -234,7 +236,7 @@ impl RelayInstance {
         })?;
         let ipv4: Option<Vec<Ipv4Addr>> = if resolve_ipv4 {
             let resolved = resolver_picker
-                .resolve(&relay_host, None, http)
+                .resolve(&relay_host, None, http,socket)
                 .await
                 .map_err(|err| {
                     let msg = format!("failed to resolve relay host {}: {}", relay_host, err);
@@ -341,6 +343,7 @@ impl RelayPicker {
         conf: &RelayConf,
         resolver_picker: &ResolverPicker,
         http: &reqwest::Client,
+        socket: &UdpSocket
     ) -> Result<Self, Error> {
         if conf.relay_instances.is_empty() {
             return Err(Error::RelayErr("no relay instances configured".into()));
@@ -348,7 +351,7 @@ impl RelayPicker {
         let mut instances = Vec::with_capacity(conf.relay_instances.len());
         for instance_conf in &conf.relay_instances {
             instances.push(
-                RelayInstance::new(instance_conf, resolver_picker, http, conf.resolve_manual)
+                RelayInstance::new(instance_conf, resolver_picker, http, conf.resolve_manual,socket)
                     .await?,
             );
         }

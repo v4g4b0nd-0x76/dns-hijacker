@@ -112,8 +112,12 @@ pub struct ResolverPicker {
 }
 
 impl ResolverPicker {
-    pub async fn new(resolvers: Vec<String>, http: reqwest::Client) -> Result<Self, Error> {
-        let sorted_resolvers = test_resolvers(resolvers, http).await?;
+    pub async fn new(
+        resolvers: Vec<String>,
+        http: reqwest::Client,
+        socket: &Arc<UdpSocket>,
+    ) -> Result<Self, Error> {
+        let sorted_resolvers = test_resolvers(resolvers, http, socket).await?;
 
         Ok(Self {
             healthy_resolvers: Arc::new(RwLock::new(sorted_resolvers)),
@@ -145,6 +149,7 @@ impl ResolverPicker {
         domain: &str,
         resolver: Option<String>,
         http: &reqwest::Client,
+        socket: &UdpSocket,
     ) -> Result<Vec<Ipv4Addr>, Error> {
         let resolver = resolver
             .map(|r| normalize_resolver(&r))
@@ -152,10 +157,11 @@ impl ResolverPicker {
         let public_ip = get_public_ip(http)
             .await
             .unwrap_or(IpAddr::V4(Ipv4Addr::new(185, 143, 233, 5))); // this ip is for iran so its a
-                                                                     // close fallback
+        // close fallback
         let src_addr = SocketAddr::new(public_ip, 0);
         let query = build_lookup_query(domain);
-        let (reply, _len) = resolve_from_upstream(&query, &resolver, src_addr, http).await?;
+        let (reply, _len) =
+            resolve_from_upstream(&query, &resolver, src_addr, http, socket).await?;
         let ips = parse_a_records(&reply);
         Ok(ips)
     }
@@ -170,11 +176,13 @@ pub fn build_http_client() -> Result<reqwest::Client, Error> {
         .map_err(|err| Error::Config(format!("failed to build HTTP client: {err}")))
 }
 
+#[inline(always)]
 pub async fn resolve_from_upstream(
     payload: &[u8],
     upstream_resolver: &str,
     src_addr: SocketAddr,
     http: &reqwest::Client,
+    upstream_socket: &UdpSocket,
 ) -> Result<(Vec<u8>, usize), Error> {
     let final_payload = inject_ecs_option(payload, src_addr).unwrap_or_else(|| payload.to_vec());
 
@@ -186,7 +194,6 @@ pub async fn resolve_from_upstream(
         .parse()
         .map_err(|_| Error::InvalidResolver(upstream_resolver.to_owned()))?;
 
-    let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?;
     upstream_socket
         .send_to(&final_payload, upstream_addr)
         .await?;
@@ -226,12 +233,15 @@ pub async fn resolve_via_doh(
 async fn test_resolvers(
     resolvers: Vec<String>,
     http: reqwest::Client,
+    socket: &Arc<UdpSocket>,
 ) -> Result<Vec<Resolver>, Error> {
     let mut results: Vec<(String, Duration)> =
         collect_concurrent(resolvers, HEALTH_CHECK_CONCURRENCY, move |resolver| {
             let http = http.clone();
+            let socket = socket.clone();
             async move {
-                match measure_latency(&resolver, &http).await {
+                let socket = socket.clone();
+                match measure_latency(&resolver, &http, &socket).await {
                     Ok(latency) => {
                         debug!("[PICKER LOG] {} responded in {:?}", resolver, latency);
                         Some((resolver, latency))
@@ -262,7 +272,11 @@ async fn test_resolvers(
     Ok(sorted_resolvers)
 }
 
-async fn measure_latency(resolver: &str, http: &reqwest::Client) -> Result<Duration, Error> {
+async fn measure_latency(
+    resolver: &str,
+    http: &reqwest::Client,
+    socket: &Arc<UdpSocket>,
+) -> Result<Duration, Error> {
     let start = Instant::now();
 
     if resolver.starts_with("https://") {
@@ -291,7 +305,6 @@ async fn measure_latency(resolver: &str, http: &reqwest::Client) -> Result<Durat
         .parse()
         .map_err(|_| Error::InvalidResolver(resolver.to_owned()))?;
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.send_to(DNS_PROBE_PACKET, addr).await?;
 
     let mut buf = [0u8; 512];
@@ -320,6 +333,7 @@ pub async fn run_resolver_finder(
     let keep_doh = resolver_searching.doh;
     // Client is Arc-backed internally; no extra Arc wrapper needed.
     let http = build_http_client()?;
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
     // RAII guard: flips the flag back to false on ANY exit from the loop body
     // (early `continue`, early `return`, or panic), not just the "happy path".
@@ -386,9 +400,10 @@ pub async fn run_resolver_finder(
 
         let mut results: Vec<(String, Duration)> =
             collect_concurrent(candidates, HEALTH_CHECK_CONCURRENCY, |resolver| {
+                let socket = socket.clone();
                 let http = http.clone();
                 async move {
-                    match measure_latency(&resolver, &http).await {
+                    match measure_latency(&resolver, &http, &socket).await {
                         Ok(latency) => {
                             debug!("[PICKER LOG] {} responded in {:?}", resolver, latency);
                             Some((resolver, latency))

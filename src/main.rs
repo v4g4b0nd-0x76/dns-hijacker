@@ -1,7 +1,16 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},  gen_relay_key, handle_query, handler::HandleQueryParams, helpers::clear_screen, init_logger, load_conf, new_cache, relay::{RelayPicker,  resolve_domain_via_relay}, resolver::Resolver, run_resolver_finder
+    Error, ResolverPicker, bind_udp_socket, build_http_client,
+    conf::watch_conf_and_reload,
+    constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
+    gen_relay_key, handle_query,
+    handler::HandleQueryParams,
+    helpers::clear_screen,
+    init_logger, load_conf, new_cache,
+    relay::{RelayPicker, resolve_domain_via_relay},
+    resolver::Resolver,
+    run_resolver_finder,
 };
 use std::{
     io,
@@ -9,7 +18,7 @@ use std::{
     sync::{Arc, RwLock, atomic::AtomicBool},
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::{net::UdpSocket, sync::Semaphore};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -52,7 +61,7 @@ enum Commands {
     GenRelayKey,
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Error> {
     init_logger();
     let cli = Cli::parse();
@@ -107,9 +116,13 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         )
     };
 
-    let resolver_picker = ResolverPicker::new(initial_resolvers, http.clone()).await?;
+    let receiver_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind receiver socket"));
+    let resolver_picker =
+        ResolverPicker::new(initial_resolvers, http.clone(), &receiver_socket).await?;
     let relay_pciker = if relay_conf.enable {
-        Some(Arc::new(RelayPicker::new(&relay_conf, &resolver_picker, &http).await?))
+        Some(Arc::new(
+            RelayPicker::new(&relay_conf, &resolver_picker, &http, &receiver_socket).await?,
+        ))
     } else {
         None
     };
@@ -129,6 +142,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
+        let receiver_socket = receiver_socket.clone();
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {
             Ok(res) => res,
             Err(err) => {
@@ -149,6 +163,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             }
         }
         for (payload, src_addr) in batch {
+            let receiver_socket = receiver_socket.clone();
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
                 warn!("reached semaphore maximum");
                 continue;
@@ -159,7 +174,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let resolver_picker = resolver_picker.clone();
             let server_socket = Arc::clone(&server_socket);
             let cache = Arc::clone(&cache);
-            let relay_picker = relay_pciker.clone(); 
+            let relay_picker = relay_pciker.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -173,6 +188,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     http: &http,
                     cache: &cache,
                     relay_picker: relay_picker.as_deref(),
+                    socket: &receiver_socket,
                 };
                 handle_query(&params).await;
             });
@@ -211,7 +227,8 @@ fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
 async fn list_resolvers(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     let http = build_http_client()?;
-    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone(), &socket).await?;
     let healthy = resolver_picker.healthy_resolvers();
     let top_resolvers: Vec<Resolver> = {
         let guard = healthy.read().unwrap();
@@ -236,7 +253,9 @@ async fn resolve(
 ) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     let http = build_http_client()?;
-    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone()).await?;
+
+    let receiver_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone(),&receiver_socket).await?;
     if relay {
         if conf.relay_conf.relay_instances.is_empty() {
             return Err(Error::Other(
@@ -244,13 +263,17 @@ async fn resolve(
             ));
         }
 
-        let relay_pciker = RelayPicker::new(&conf.relay_conf,&resolver_picker,&http).await?;
+        let relay_pciker =
+            RelayPicker::new(&conf.relay_conf, &resolver_picker, &http, &receiver_socket).await?;
 
         let relay_client = relay_pciker.pick();
-        let relay_resp =
-            resolve_domain_via_relay(relay_client.client(), relay_client.url(), relay_client.key(), domain)
-                .await?;
-
+        let relay_resp = resolve_domain_via_relay(
+            relay_client.client(),
+            relay_client.url(),
+            relay_client.key(),
+            domain,
+        )
+        .await?;
 
         if relay_resp.is_empty() {
             println!(";; no A records found for {domain}");
@@ -260,7 +283,9 @@ async fn resolve(
             }
         }
     } else {
-        let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
+        let resolved = resolver_picker
+            .resolve(domain, resolver, &http, &receiver_socket)
+            .await?;
         // clear_screen();
         if resolved.is_empty() {
             println!(";; no A records found for {domain}");

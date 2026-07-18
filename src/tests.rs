@@ -11,8 +11,7 @@ use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
     cache::{
-        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store,
-        clamp_cache_ttl,
+        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
     },
     conf::Conf,
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
@@ -63,6 +62,7 @@ async fn call_handle_query(
     http: &reqwest::Client,
     cache: &ResponseCache,
 ) {
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind udp socket"));
     let params = HandleQueryParams {
         payload,
         src_addr,
@@ -73,6 +73,7 @@ async fn call_handle_query(
         http,
         cache,
         relay_picker: None,
+        socket: &socket,
     };
     handle_query(&params).await;
 }
@@ -126,7 +127,7 @@ fn craft_redirect_appends_a_record() {
     assert_eq!(resp[7], 2);
 
     assert_eq!(&resp[resp.len() - 4..], &[192, 168, 1, 2]);
-    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]); 
+    assert_eq!(&resp[resp.len() - 6..resp.len() - 4], &[0x00, 0x04]);
 
     let record_len = 16;
     let first_record_start = resp.len() - (record_len * 2);
@@ -521,7 +522,8 @@ async fn relay_picker_new_rejects_empty_instances() {
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind socket"));
 
-    let result = RelayPicker::new(&conf, &picker, &http).await;
+    let result = RelayPicker::new(&conf, &picker, &http,&socket).await;
     assert!(result.is_err());
 }
