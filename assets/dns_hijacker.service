@@ -35,6 +35,7 @@ RestrictRealtime=true
 RestrictNamespaces=true
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/dns-hijacker
+ReadWritePaths=/opt/dns-hijacker/logs
 # Allow reading config; no write needed at runtime.
 ProtectHostname=true
 

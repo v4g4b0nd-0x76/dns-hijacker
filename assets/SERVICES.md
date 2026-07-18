@@ -16,6 +16,7 @@ Required capability: `CAP_NET_BIND_SERVICE` (bind port 53 without full root).
 sudo useradd --system --home /opt/dns-hijacker --shell /usr/sbin/nologin dns-hijacker || true
 sudo mkdir -p /opt/dns-hijacker
 sudo cp target/*/release/dns-hijacker /opt/dns-hijacker/dns-hijacker
+sudo mkdir /opt/dns-hijacker/logs 
 # or native path:
 # sudo cp target/release/dns-hijacker /opt/dns-hijacker/dns-hijacker
 sudo cp conf.toml /opt/dns-hijacker/
