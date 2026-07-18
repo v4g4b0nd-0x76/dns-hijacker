@@ -5,7 +5,7 @@ use dns_hijacker::{
     conf::watch_conf_and_reload,
     constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
     gen_relay_key, handle_query,
-    handler::HandleQueryParams,
+    handler::{DomainTrie, HandleQueryParams},
     helpers::clear_screen,
     init_logger, load_conf, new_cache,
     relay::{RelayPicker, resolve_domain_via_relay},
@@ -88,20 +88,19 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let conf_read = conf.read().unwrap();
         conf_read.hotreload_conf.clone()
     };
-    let redirect_list: Arc<ArcSwap<Vec<(String, String)>>> = {
+
+    let rule_trie: Arc<ArcSwap<DomainTrie>> = {
         let conf_read = conf.read().unwrap();
-        Arc::new(ArcSwap::from_pointee(conf_read.redirect_list.clone()))
-    };
-    let drop_list: Arc<ArcSwap<Vec<String>>> = {
-        let conf_read = conf.read().unwrap();
-        Arc::new(ArcSwap::from_pointee(conf_read.drop_list.clone()))
+        Arc::new(ArcSwap::from_pointee(DomainTrie::build(
+            &conf_read.drop_list,
+            &conf_read.redirect_list,
+        )))
     };
     tokio::spawn(watch_conf_and_reload(
         conf_path.clone(),
         Duration::from_millis(hotreload_conf.poll_interval_ms),
         Arc::clone(&conf),
-        Arc::clone(&redirect_list),
-        Arc::clone(&drop_list),
+        Arc::clone(&rule_trie),
         Arc::clone(&cache),
     ));
     let http = build_http_client()?;
@@ -116,7 +115,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         )
     };
 
-    let receiver_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind receiver socket"));
+    let receiver_socket = Arc::new(
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .expect("failed to bind receiver socket"),
+    );
     let resolver_picker =
         ResolverPicker::new(initial_resolvers, http.clone(), &receiver_socket).await?;
     let relay_pciker = if relay_conf.enable {
@@ -168,8 +171,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 warn!("reached semaphore maximum");
                 continue;
             };
-            let redirect_list = redirect_list.load_full();
-            let drop_list = drop_list.load_full();
+            let rule_trie = rule_trie.load_full();
             let http = http.clone();
             let resolver_picker = resolver_picker.clone();
             let server_socket = Arc::clone(&server_socket);
@@ -178,11 +180,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
             tokio::spawn(async move {
                 let _permit = permit;
+
                 let params = HandleQueryParams {
                     payload: &payload,
                     src_addr,
-                    redirect_list: &redirect_list,
-                    drop_list: &drop_list,
+                    rule_trie: &rule_trie,
                     resolver_picker: &resolver_picker,
                     server_socket: &server_socket,
                     http: &http,
@@ -255,7 +257,8 @@ async fn resolve(
     let http = build_http_client()?;
 
     let receiver_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone(),&receiver_socket).await?;
+    let resolver_picker =
+        ResolverPicker::new(conf.resolvers, http.clone(), &receiver_socket).await?;
     if relay {
         if conf.relay_conf.relay_instances.is_empty() {
             return Err(Error::Other(

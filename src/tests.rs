@@ -17,9 +17,9 @@ use crate::{
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
-        inject_ecs_option, matches_domain_pattern, min_answer_ttl, parse_domain, with_txid,
+        inject_ecs_option, min_answer_ttl, parse_domain, with_txid,
     },
-    handler::{HandleQueryParams, handle_query},
+    handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, handle_query},
     relay::{RelayInstance, RelayPicker},
     resolver::{ResolverPicker, create_resolver},
 };
@@ -55,8 +55,7 @@ fn mock_query_blocked_example() -> Vec<u8> {
 async fn call_handle_query(
     payload: &[u8],
     src_addr: SocketAddr,
-    redirect_list: &Arc<Vec<(String, String)>>,
-    drop_list: &Arc<Vec<String>>,
+    rule_trie: &Arc<DomainTrie>,
     resolver_picker: &ResolverPicker,
     server_socket: &UdpSocket,
     http: &reqwest::Client,
@@ -66,8 +65,7 @@ async fn call_handle_query(
     let params = HandleQueryParams {
         payload,
         src_addr,
-        redirect_list,
-        drop_list,
+        rule_trie,
         resolver_picker,
         server_socket,
         http,
@@ -76,6 +74,12 @@ async fn call_handle_query(
         socket: &socket,
     };
     handle_query(&params).await;
+}
+
+/// Builds a `DomainTrie` directly from a `Conf`'s drop_list/redirect_list,
+/// matching what `main.rs`/`watch_conf_and_reload` do on load/reload.
+fn trie_from_conf(conf: &Conf) -> Arc<DomainTrie> {
+    Arc::new(DomainTrie::build(&conf.drop_list, &conf.redirect_list))
 }
 
 #[test]
@@ -93,12 +97,29 @@ fn parse_domain_rejects_truncated() {
 }
 
 #[test]
-fn matches_exact_and_wildcard_patterns() {
-    assert!(matches_domain_pattern("google.com", "google.com"));
-    assert!(matches_domain_pattern("a.example.com", "*.example.com"));
-    assert!(matches_domain_pattern("example.com", "*.example.com"));
-    assert!(!matches_domain_pattern("notexample.com", "*.example.com"));
-    assert!(!matches_domain_pattern("google.com", "example.com"));
+fn trie_matches_exact_and_wildcard_patterns() {
+    // Replaces the old matches_domain_pattern-based test now that pattern
+    // matching lives inside DomainTrie::lookup rather than a standalone fn.
+    let drop_list = vec!["*.example.com".to_string()];
+    let trie = DomainTrie::build(&drop_list, &[]);
+
+    assert_eq!(trie.lookup("example.com"), &DomainTriePolicy::Drop);
+    assert_eq!(trie.lookup("a.example.com"), &DomainTriePolicy::Drop);
+    assert_eq!(trie.lookup("deep.sub.example.com"), &DomainTriePolicy::Drop);
+    assert_eq!(trie.lookup("notexample.com"), &DomainTriePolicy::None);
+    assert_eq!(trie.lookup("google.com"), &DomainTriePolicy::None);
+}
+
+#[test]
+fn trie_redirect_carries_ip_list() {
+    let redirect_list = vec![("*.test.com".to_string(), "192.168.1.1,192.168.1.2".to_string())];
+    let trie = DomainTrie::build(&[], &redirect_list);
+
+    assert_eq!(
+        trie.lookup("foo.test.com"),
+        &DomainTriePolicy::Redirect(vec!["192.168.1.1".to_string(), "192.168.1.2".to_string()])
+    );
+    assert_eq!(trie.lookup("other.com"), &DomainTriePolicy::None);
 }
 
 #[test]
@@ -209,8 +230,7 @@ async fn integration_redirect_and_drop_over_udp() {
         resolvers: vec!["127.0.0.1:9".into()],
         ..Default::default()
     };
-    let redirect_list = Arc::new(conf.redirect_list.clone());
-    let drop_list = Arc::new(conf.drop_list.clone());
+    let rule_trie = trie_from_conf(&conf);
 
     let picker = ResolverPicker::from_healthy(vec![create_resolver("127.0.0.1:9")]);
     let http = reqwest::Client::builder()
@@ -222,17 +242,7 @@ async fn integration_redirect_and_drop_over_udp() {
     client.send_to(&redirect_query, server_addr).await.unwrap();
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &Arc::new(conf.redirect_list),
-        &Arc::new(conf.drop_list),
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert!(resp_len > redirect_query.len());
@@ -242,17 +252,7 @@ async fn integration_redirect_and_drop_over_udp() {
     let drop_query = mock_query_blocked_example();
     client.send_to(&drop_query, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &redirect_list,
-        &drop_list,
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(resp_len, drop_query.len());
@@ -282,8 +282,7 @@ async fn integration_udp_upstream_echo() {
         resolvers: vec![upstream_addr.to_string()],
         ..Default::default()
     };
-    let redirect_list = Arc::new(conf.redirect_list.clone());
-    let drop_list = Arc::new(conf.drop_list.clone());
+    let rule_trie = trie_from_conf(&conf);
 
     let picker = ResolverPicker::from_healthy(vec![create_resolver(&upstream_addr.to_string())]);
     let http = reqwest::Client::builder()
@@ -296,17 +295,7 @@ async fn integration_udp_upstream_echo() {
 
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &redirect_list,
-        &drop_list,
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
 
     let (resp_len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
         .await
@@ -346,8 +335,7 @@ async fn integration_cache_hit_skips_upstream() {
         resolvers: vec![upstream_addr.to_string()],
         ..Default::default()
     };
-    let redirect_list = Arc::new(conf.redirect_list.clone());
-    let drop_list = Arc::new(conf.drop_list.clone());
+    let rule_trie = trie_from_conf(&conf);
 
     let picker = ResolverPicker::from_healthy(vec![create_resolver(&upstream_addr.to_string())]);
     let http = reqwest::Client::builder()
@@ -362,17 +350,7 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &redirect_list,
-        &drop_list,
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x01, 0x01]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -382,17 +360,7 @@ async fn integration_cache_hit_skips_upstream() {
     q2[1] = 0x02;
     client.send_to(&q2, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &redirect_list,
-        &drop_list,
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x02, 0x02]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -417,8 +385,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         resolvers: vec![blackhole_addr.to_string()],
         ..Default::default()
     };
-    let redirect_list = Arc::new(conf.redirect_list.clone());
-    let drop_list = Arc::new(conf.drop_list.clone());
+    let rule_trie = trie_from_conf(&conf);
 
     let picker = ResolverPicker::from_healthy(vec![create_resolver(&blackhole_addr.to_string())]);
     let http = reqwest::Client::builder()
@@ -432,17 +399,7 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
-    call_handle_query(
-        &buf[..len],
-        src,
-        &redirect_list,
-        &drop_list,
-        &picker,
-        &server,
-        &http,
-        &cache,
-    )
-    .await;
+    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
     let elapsed = started.elapsed();
     assert!(
         elapsed >= RESOLVE_TIMEOUT && elapsed < RESOLVE_TIMEOUT + Duration::from_secs(1),
@@ -524,6 +481,6 @@ async fn relay_picker_new_rejects_empty_instances() {
         .unwrap();
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind socket"));
 
-    let result = RelayPicker::new(&conf, &picker, &http,&socket).await;
+    let result = RelayPicker::new(&conf, &picker, &http, &socket).await;
     assert!(result.is_err());
 }

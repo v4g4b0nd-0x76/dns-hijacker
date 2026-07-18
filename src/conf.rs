@@ -1,6 +1,7 @@
 use crate::ResponseCache;
 use crate::cache::remove_domains_from_cache;
 use crate::errors::Error;
+use crate::handler::DomainTrie;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -104,8 +105,7 @@ pub async fn watch_conf_and_reload(
     path: PathBuf,
     poll_interval: Duration,
     conf: Arc<RwLock<Conf>>,
-    redirect_list: Arc<ArcSwap<Vec<(String, String)>>>,
-    drop_list: Arc<ArcSwap<Vec<String>>>,
+    rule_trie: Arc<ArcSwap<DomainTrie>>,
     cache: Arc<ResponseCache>,
 ) {
     let mut tick = interval(poll_interval);
@@ -129,10 +129,10 @@ pub async fn watch_conf_and_reload(
 
         match load_conf(&path) {
             Ok(new_conf) => {
-                redirect_list.store(Arc::new(new_conf.redirect_list.clone()));
                 let drop_list_clone = new_conf.drop_list.clone();
+                let new_trie = DomainTrie::build(&new_conf.drop_list, &new_conf.redirect_list);
+               rule_trie.store(Arc::new(new_trie));
                 remove_domains_from_cache(&cache, &drop_list_clone);
-                drop_list.store(Arc::new(drop_list_clone));
                 *conf.write().unwrap() = new_conf;
 
                 info!("config reloaded successfully");
