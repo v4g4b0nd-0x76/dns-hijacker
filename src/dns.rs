@@ -1,4 +1,4 @@
-use rand::{RngExt};
+use rand::RngExt;
 use std::net::SocketAddr;
 
 #[inline(always)]
@@ -110,54 +110,6 @@ pub fn craft_servfail_response(payload: &[u8]) -> Option<Vec<u8>> {
     Some(resp)
 }
 
-#[inline(always)]
-pub fn inject_ecs_option(payload: &[u8], client_addr: SocketAddr) -> Option<Vec<u8>> {
-    let ip_bytes = match client_addr.ip() {
-        std::net::IpAddr::V4(ipv4) => {
-            let octets = ipv4.octets();
-            if octets[0] == 127 {
-                [8, 8, 8, 8]
-            } else {
-                octets
-            }
-        }
-        std::net::IpAddr::V6(_) => return None,
-    };
-
-    let mut modified = payload.to_vec();
-    if modified.len() < 12 {
-        return Some(modified);
-    }
-
-    let arcount = ((modified[10] as u16) << 8) | (modified[11] as u16);
-    let new_arcount = arcount + 1;
-    modified[10] = (new_arcount >> 8) as u8;
-    modified[11] = (new_arcount & 0xFF) as u8;
-
-    let mut opt_rr = Vec::new();
-
-    opt_rr.push(0x00);
-    opt_rr.extend_from_slice(&[0x00, 0x29]);
-    opt_rr.extend_from_slice(&[0x10, 0x00]);
-    opt_rr.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-    let rd_length: u16 = 2 + 2 + 2 + 1 + 1 + 3;
-    opt_rr.extend_from_slice(&rd_length.to_be_bytes());
-
-    opt_rr.extend_from_slice(&[0x00, 0x08]);
-
-    let option_data_len: u16 = 2 + 1 + 1 + 3;
-    opt_rr.extend_from_slice(&option_data_len.to_be_bytes());
-
-    opt_rr.extend_from_slice(&[0x00, 0x01]);
-    opt_rr.push(24);
-    opt_rr.push(0);
-
-    opt_rr.extend_from_slice(&ip_bytes[0..3]);
-
-    modified.extend_from_slice(&opt_rr);
-    Some(modified)
-}
 
 #[inline(always)]
 pub fn matches_domain_pattern(domain: &str, pattern: &str) -> bool {
@@ -256,8 +208,10 @@ pub fn parse_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
         }
         if rtype == 1 && rdlength == 4 {
             ips.push(Ipv4Addr::new(
-                buf[rdata_start], buf[rdata_start + 1],
-                buf[rdata_start + 2], buf[rdata_start + 3],
+                buf[rdata_start],
+                buf[rdata_start + 1],
+                buf[rdata_start + 2],
+                buf[rdata_start + 3],
             ));
         }
         pos = rdata_start + rdlength;
@@ -314,4 +268,224 @@ pub fn min_answer_ttl(packet: &[u8]) -> Option<u32> {
     } else {
         Some(min_ttl)
     }
+}
+
+/// Parsed representation of an EDNS0 OPT pseudo-RR (RFC 6891).
+#[derive(Debug, Clone)]
+pub struct EdnsOpt {
+    /// Offset in the original packet where this OPT RR begins (the root name byte, 0x00).
+    pub rr_start: usize,
+    /// Offset just past the end of this OPT RR.
+    pub rr_end: usize,
+    /// UDP payload size advertised by the client (from CLASS field).
+    pub udp_payload_size: u16,
+    /// Extended RCODE high 8 bits (from TTL field byte 0).
+    pub extended_rcode: u8,
+    /// EDNS version (from TTL field byte 1).
+    pub version: u8,
+    /// DO bit (DNSSEC OK) and other flags (from TTL field bytes 2-3).
+    pub flags: u16,
+    /// Raw option data (RDATA) - may contain ECS, cookies, padding, etc.
+    pub options: Vec<u8>,
+}
+
+/// Scans the Additional section for an existing OPT RR (type 41).
+/// Returns None if there is no OPT record present.
+pub fn find_opt_record(buf: &[u8]) -> Option<EdnsOpt> {
+    if buf.len() < 12 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let nscount = u16::from_be_bytes([buf[8], buf[9]]) as usize;
+    let arcount = u16::from_be_bytes([buf[10], buf[11]]) as usize;
+
+    let mut pos = 12;
+
+    for _ in 0..qdcount {
+        pos = skip_name(buf, pos)?;
+        pos += 4; // qtype + qclass
+    }
+
+    // Answer + authority sections both use the standard RR format; skip over them.
+    for _ in 0..(ancount + nscount) {
+        pos = skip_rr(buf, pos)?;
+    }
+
+    // Additional section: look for the OPT RR (type 41 / 0x0029).
+    for _ in 0..arcount {
+        let rr_start = pos;
+        let name_end = skip_name(buf, pos)?;
+        if name_end + 10 > buf.len() {
+            return None;
+        }
+        let rtype = u16::from_be_bytes([buf[name_end], buf[name_end + 1]]);
+        let class = u16::from_be_bytes([buf[name_end + 2], buf[name_end + 3]]);
+        let ttl_bytes = &buf[name_end + 4..name_end + 8];
+        let rdlength = u16::from_be_bytes([buf[name_end + 8], buf[name_end + 9]]) as usize;
+        let rdata_start = name_end + 10;
+        if rdata_start + rdlength > buf.len() {
+            return None;
+        }
+
+        if rtype == 41 {
+            return Some(EdnsOpt {
+                rr_start,
+                rr_end: rdata_start + rdlength,
+                udp_payload_size: class,
+                extended_rcode: ttl_bytes[0],
+                version: ttl_bytes[1],
+                flags: u16::from_be_bytes([ttl_bytes[2], ttl_bytes[3]]),
+                options: buf[rdata_start..rdata_start + rdlength].to_vec(),
+            });
+        }
+
+        pos = rdata_start + rdlength;
+    }
+
+    None
+}
+
+/// Skips a full resource record (name + type + class + ttl + rdlength + rdata).
+fn skip_rr(buf: &[u8], offset: usize) -> Option<usize> {
+    let name_end = skip_name(buf, offset)?;
+    if name_end + 10 > buf.len() {
+        return None;
+    }
+    let rdlength = u16::from_be_bytes([buf[name_end + 8], buf[name_end + 9]]) as usize;
+    let end = name_end + 10 + rdlength;
+    if end > buf.len() {
+        return None;
+    }
+    Some(end)
+}
+
+
+/// One EDNS0 option (RFC 6891 section 6.1.2): OPTION-CODE, OPTION-LENGTH, OPTION-DATA.
+struct EdnsOption<'a> {
+    code: u16,
+    data: &'a [u8],
+}
+
+/// Parses the raw options blob of an OPT RR into individual (code, data) pairs.
+#[inline(always)]
+fn parse_options(options: &[u8]) -> Vec<EdnsOption<'_>> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos + 4 <= options.len() {
+        let code = u16::from_be_bytes([options[pos], options[pos + 1]]);
+        let len = u16::from_be_bytes([options[pos + 2], options[pos + 3]]) as usize;
+        if pos + 4 + len > options.len() {
+            break; // malformed, stop parsing rather than panic
+        }
+        out.push(EdnsOption {
+            code,
+            data: &options[pos + 4..pos + 4 + len],
+        });
+        pos += 4 + len;
+    }
+    out
+}
+
+/// Client Subnet option code (RFC 7871).
+const OPT_CODE_ECS: u16 = 8;
+
+#[inline(always)]
+pub fn set_ecs_option(
+    payload: &[u8],
+    client_addr: SocketAddr,
+    fabricate_public_ip_for_loopback: Option<[u8; 4]>,
+) -> Option<Vec<u8>> {
+    let ip_bytes = match client_addr.ip() {
+        std::net::IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            if octets[0] == 127 {
+                match fabricate_public_ip_for_loopback {
+                    Some(fake) => fake,
+                    None => return Some(payload.to_vec()), // leave ECS out for loopback/test clients
+                }
+            } else {
+                octets
+            }
+        }
+        std::net::IpAddr::V6(_) => return None, // TODO: add AAAA/IPv6 ECS (family 2) support
+    };
+
+    let mut ecs_data = Vec::with_capacity(8);
+    ecs_data.extend_from_slice(&[0x00, 0x01]); // FAMILY = 1 (IPv4)
+    ecs_data.push(24); // SOURCE PREFIX-LENGTH - /24 is the common privacy-preserving default
+    ecs_data.push(0); // SCOPE PREFIX-LENGTH - 0 in queries, filled in by upstream in responses
+    ecs_data.extend_from_slice(&ip_bytes[0..3]); // truncated address per RFC 7871 section 6
+
+    match find_opt_record(payload) {
+        Some(existing) => {
+            let mut options = parse_options(&existing.options);
+            // Drop any existing ECS option - we're replacing it, not appending.
+            options.retain(|opt| opt.code != OPT_CODE_ECS);
+
+            let mut new_options = Vec::new();
+            for opt in &options {
+                new_options.extend_from_slice(&opt.code.to_be_bytes());
+                new_options.extend_from_slice(&(opt.data.len() as u16).to_be_bytes());
+                new_options.extend_from_slice(opt.data);
+            }
+            new_options.extend_from_slice(&OPT_CODE_ECS.to_be_bytes());
+            new_options.extend_from_slice(&(ecs_data.len() as u16).to_be_bytes());
+            new_options.extend_from_slice(&ecs_data);
+
+            rebuild_with_new_opt(payload, &existing, &new_options)
+        }
+        None => {
+            // No existing OPT RR - build one from scratch, matching the old behavior
+            // but through the same rebuild path so there's only one code path total.
+            let synthetic = EdnsOpt {
+                rr_start: payload.len(),
+                rr_end: payload.len(),
+                udp_payload_size: 4096, // common modern default (was implicit before)
+                extended_rcode: 0,
+                version: 0,
+                flags: 0,
+                options: Vec::new(),
+            };
+            rebuild_with_new_opt(payload, &synthetic, &{
+                let mut v = Vec::new();
+                v.extend_from_slice(&OPT_CODE_ECS.to_be_bytes());
+                v.extend_from_slice(&(ecs_data.len() as u16).to_be_bytes());
+                v.extend_from_slice(&ecs_data);
+                v
+            })
+        }
+    }
+}
+
+
+#[inline(always)]
+fn rebuild_with_new_opt(payload: &[u8], existing: &EdnsOpt, new_options: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + new_options.len() + 16);
+    out.extend_from_slice(&payload[..existing.rr_start]);
+
+    out.push(0x00); // root name
+    out.extend_from_slice(&41u16.to_be_bytes()); // TYPE = OPT
+    out.extend_from_slice(&existing.udp_payload_size.to_be_bytes()); // CLASS = UDP payload size
+    out.push(existing.extended_rcode);
+    out.push(existing.version);
+    out.extend_from_slice(&existing.flags.to_be_bytes());
+    out.extend_from_slice(&(new_options.len() as u16).to_be_bytes());
+    out.extend_from_slice(new_options);
+
+    out.extend_from_slice(&payload[existing.rr_end..]);
+
+    // Fix up ARCOUNT only if we just added a brand new OPT RR (rr_start == rr_end == old len
+    // means "synthetic, wasn't in the original packet").
+    if existing.rr_start == existing.rr_end && existing.rr_start == payload.len() {
+        if out.len() < 12 {
+            return None;
+        }
+        let arcount = u16::from_be_bytes([out[10], out[11]]);
+        let new_arcount = arcount + 1;
+        out[10] = (new_arcount >> 8) as u8;
+        out[11] = (new_arcount & 0xFF) as u8;
+    }
+
+    Some(out)
 }

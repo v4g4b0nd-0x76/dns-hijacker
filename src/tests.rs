@@ -16,8 +16,7 @@ use crate::{
     conf::Conf,
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
-        craft_nxdomain_response, craft_redirect_response, craft_servfail_response,
-        inject_ecs_option, min_answer_ttl, parse_domain, with_txid,
+        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl, parse_domain, set_ecs_option, with_txid
     },
     handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, handle_query},
     relay::{RelayInstance, RelayPicker},
@@ -61,7 +60,11 @@ async fn call_handle_query(
     http: &reqwest::Client,
     cache: &ResponseCache,
 ) {
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind udp socket"));
+    let socket = Arc::new(
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .expect("failed to bind udp socket"),
+    );
     let params = HandleQueryParams {
         payload,
         src_addr,
@@ -112,7 +115,10 @@ fn trie_matches_exact_and_wildcard_patterns() {
 
 #[test]
 fn trie_redirect_carries_ip_list() {
-    let redirect_list = vec![("*.test.com".to_string(), "192.168.1.1,192.168.1.2".to_string())];
+    let redirect_list = vec![(
+        "*.test.com".to_string(),
+        "192.168.1.1,192.168.1.2".to_string(),
+    )];
     let trie = DomainTrie::build(&[], &redirect_list);
 
     assert_eq!(
@@ -157,23 +163,50 @@ fn craft_redirect_appends_a_record() {
 }
 
 #[test]
-fn inject_ecs_rewrites_loopback_and_bumps_arcount() {
+fn set_ecs_option_skips_loopback_by_default() {
+    // With `None`, loopback/test clients get no ECS added at all - this is
+    // the new safer default, replacing the old hardcoded 127.x -> 8.8.8.8 remap.
     let query = mock_query_google().to_vec();
     let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53000);
-    let modified = inject_ecs_option(&query, client).expect("ecs");
+    let result = set_ecs_option(&query, client, None).expect("should return Some(unchanged)");
+    assert_eq!(result, query);
+}
+
+#[test]
+fn set_ecs_option_fabricates_loopback_ip_when_opted_in() {
+    // Passing Some(fake_ip) is the explicit opt-in path for testing ECS
+    // behavior against loopback clients, replacing the old silent 8.8.8.8 hardcode.
+    let query = mock_query_google().to_vec();
+    let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53000);
+    let modified = set_ecs_option(&query, client, Some([203, 0, 113, 0])).expect("ecs");
 
     let old_ar = ((query[10] as u16) << 8) | query[11] as u16;
     let new_ar = ((modified[10] as u16) << 8) | modified[11] as u16;
     assert_eq!(new_ar, old_ar + 1);
     assert!(modified.len() > query.len());
-    assert!(modified.ends_with(&[8, 8, 8]));
+    // ECS data ends with the truncated /24 octets (first 3 of the 4 given).
+    assert!(modified.ends_with(&[203, 0, 113]));
 }
 
 #[test]
-fn inject_ecs_skips_ipv6_clients() {
+fn set_ecs_option_rewrites_real_client_ip() {
+    // A non-loopback client should always get its actual subnet, regardless
+    // of the fabricate_public_ip_for_loopback setting.
+    let query = mock_query_google().to_vec();
+    let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 53000);
+    let modified = set_ecs_option(&query, client, None).expect("ecs");
+
+    let old_ar = ((query[10] as u16) << 8) | query[11] as u16;
+    let new_ar = ((modified[10] as u16) << 8) | modified[11] as u16;
+    assert_eq!(new_ar, old_ar + 1);
+    assert!(modified.ends_with(&[198, 51, 100]));
+}
+
+#[test]
+fn set_ecs_option_skips_ipv6_clients() {
     let query = mock_query_google().to_vec();
     let client: SocketAddr = "[::1]:53000".parse().unwrap();
-    assert!(inject_ecs_option(&query, client).is_none());
+    assert!(set_ecs_option(&query, client, None).is_none());
 }
 
 #[test]
@@ -242,7 +275,16 @@ async fn integration_redirect_and_drop_over_udp() {
     client.send_to(&redirect_query, server_addr).await.unwrap();
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert!(resp_len > redirect_query.len());
@@ -252,7 +294,16 @@ async fn integration_redirect_and_drop_over_udp() {
     let drop_query = mock_query_blocked_example();
     client.send_to(&drop_query, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(resp_len, drop_query.len());
@@ -295,7 +346,16 @@ async fn integration_udp_upstream_echo() {
 
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
 
     let (resp_len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
         .await
@@ -350,7 +410,16 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x01, 0x01]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -360,7 +429,16 @@ async fn integration_cache_hit_skips_upstream() {
     q2[1] = 0x02;
     client.send_to(&q2, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
     let (resp_len, _) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..2], &[0x02, 0x02]);
     assert_eq!(&buf[resp_len - 4..resp_len], &[1, 1, 1, 1]);
@@ -399,7 +477,16 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
-    call_handle_query(&buf[..len], src, &rule_trie, &picker, &server, &http, &cache).await;
+    call_handle_query(
+        &buf[..len],
+        src,
+        &rule_trie,
+        &picker,
+        &server,
+        &http,
+        &cache,
+    )
+    .await;
     let elapsed = started.elapsed();
     assert!(
         elapsed >= RESOLVE_TIMEOUT && elapsed < RESOLVE_TIMEOUT + Duration::from_secs(1),
@@ -479,7 +566,11 @@ async fn relay_picker_new_rejects_empty_instances() {
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.expect("failed to bind socket"));
+    let socket = Arc::new(
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .expect("failed to bind socket"),
+    );
 
     let result = RelayPicker::new(&conf, &picker, &http, &socket).await;
     assert!(result.is_err());

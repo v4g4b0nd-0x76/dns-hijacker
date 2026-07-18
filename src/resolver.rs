@@ -22,7 +22,7 @@ use crate::{
         DNS_PROBE_PACKET, DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SEARCH_RESOLVER_INTERVAL,
         UDP_PROBE_TIMEOUT,
     },
-    dns::{build_lookup_query, inject_ecs_option, parse_a_records},
+    dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
     helpers::get_public_ip,
 };
@@ -184,7 +184,7 @@ pub async fn resolve_from_upstream(
     http: &reqwest::Client,
     upstream_socket: &UdpSocket,
 ) -> Result<(Vec<u8>, usize), Error> {
-    let final_payload = inject_ecs_option(payload, src_addr).unwrap_or_else(|| payload.to_vec());
+    let final_payload = set_ecs_option(payload, src_addr, None).unwrap_or_else(|| payload.to_vec());
 
     if upstream_resolver.starts_with("https://") {
         return resolve_via_doh(http, upstream_resolver, &final_payload).await;
