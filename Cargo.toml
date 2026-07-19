@@ -8,6 +8,7 @@ serde = { version = "1.0.228", default-features = false, features = ["derive", "
 tokio = { version = "1.52.3", default-features = false, features = [
     "rt",
     "process",
+    "fs",
     "rt-multi-thread",
     "macros",
     "net",
