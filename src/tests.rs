@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -63,6 +63,7 @@ async fn call_handle_query(
     cache: &ResponseCache,
 ) {
     let metric_wrapper = Some(&(Arc::new(MetricWrapper::new())));
+    let is_vpn_active = Arc::new(AtomicBool::new(false));
     let params = HandleQueryParams {
         payload,
         src_addr,
@@ -73,6 +74,7 @@ async fn call_handle_query(
         cache,
         relay_picker: None,
         metric_wrapper,
+        is_vpn_active:&is_vpn_active
     };
     handle_query(&params).await;
 }

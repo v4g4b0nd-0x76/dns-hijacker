@@ -1,12 +1,30 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{BACKLOG_CAPACITY, LOCAL_DNS, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, handler::{DomainTrie, HandleQueryParams}, helpers::clear_screen,  init_logger, load_conf, metric_wrapper::MetricWrapper, new_cache, relay::{RelayPicker, resolve_domain_via_relay}, resolver::Resolver, run_resolver_finder
+    Error, ResolverPicker, bind_udp_socket, build_http_client,
+    conf::watch_conf_and_reload,
+    constants::{
+        BACKLOG_CAPACITY, LOCAL_DNS, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX,
+        RESOLVE_SEMAPHORE,
+    },
+    gen_relay_key, handle_query,
+    handler::{DomainTrie, HandleQueryParams},
+    helpers::clear_screen,
+    init_logger, load_conf,
+    metric_wrapper::MetricWrapper,
+    netguard::run_network_guard,
+    new_cache,
+    relay::{RelayPicker, resolve_domain_via_relay},
+    resolver::Resolver,
+    run_resolver_finder,
 };
 use std::{
     io,
     path::PathBuf,
-    sync::{Arc, RwLock, atomic::{AtomicBool , Ordering::Relaxed}},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
     time::Duration,
 };
 use tokio::{net::UdpSocket, sync::Semaphore};
@@ -71,7 +89,6 @@ async fn main() -> Result<(), Error> {
     }
 }
 
-
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
     let cache = Arc::new(new_cache());
@@ -106,6 +123,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&rule_trie),
         Arc::clone(&cache),
     ));
+    let is_vpn_active = Arc::new(AtomicBool::new(false));
+    tokio::spawn(run_network_guard(Arc::clone(&is_vpn_active)));
     let http = build_http_client()?;
     let (initial_resolvers, resolver_searching, searching_enabled, relay_conf) = {
         let conf_read = conf.read().unwrap();
@@ -162,6 +181,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let relay_picker = relay_pciker.clone();
         let metric_wrapper = metric_wrapper.clone();
         let max_age = Duration::from_millis(MAX_BACKLOG_AGE_MS);
+        let is_vpn_active = Arc::clone(&is_vpn_active);
 
         tokio::spawn(async move {
             loop {
@@ -169,7 +189,10 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     match backlog_rx.recv().await {
                         Some((payload, src_addr, enqueued_at)) => {
                             if enqueued_at.elapsed() > max_age {
-                                warn!("dropping stale backlogged query ({:?} old)", enqueued_at.elapsed());
+                                warn!(
+                                    "dropping stale backlogged query ({:?} old)",
+                                    enqueued_at.elapsed()
+                                );
                                 continue;
                             }
                             break (payload, src_addr);
@@ -189,6 +212,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 let cache = Arc::clone(&cache);
                 let relay_picker = relay_picker.clone();
                 let metric_wrapper = metric_wrapper.clone();
+                let is_vpn_active = is_vpn_active.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -202,6 +226,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                         cache: &cache,
                         relay_picker: relay_picker.as_deref(),
                         metric_wrapper: metric_wrapper.as_ref(),
+                        is_vpn_active: &is_vpn_active,
                     };
                     handle_query(&params).await;
                 });
@@ -232,14 +257,16 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             }
         }
         if let Some(metric_wrapper) = metric_wrapper.as_ref() {
-            metric_wrapper.total_req.fetch_add(batch.len() as u64, Relaxed);
+            metric_wrapper
+                .total_req
+                .fetch_add(batch.len() as u64, Relaxed);
         }
         for (payload, src_addr) in batch {
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
                 match backlog_tx.try_send((payload, src_addr, tokio::time::Instant::now())) {
                     Ok(_) => {
                         if let Some(m) = metric_wrapper.as_ref() {
-                            m.total_req.fetch_add(0, Relaxed); 
+                            m.total_req.fetch_add(0, Relaxed);
                         }
                     }
                     Err(_) => {
@@ -255,6 +282,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let cache = Arc::clone(&cache);
             let relay_picker = relay_pciker.clone();
             let metric_wrapper = metric_wrapper.clone();
+            let is_vpn_active = is_vpn_active.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -268,6 +296,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     cache: &cache,
                     relay_picker: relay_picker.as_deref(),
                     metric_wrapper: metric_wrapper.as_ref(),
+                    is_vpn_active: &is_vpn_active,
                 };
                 handle_query(&params).await;
             });
@@ -343,8 +372,7 @@ async fn resolve(
             ));
         }
 
-        let relay_pciker =
-            RelayPicker::new(&conf.relay_conf, &resolver_picker, &http).await?;
+        let relay_pciker = RelayPicker::new(&conf.relay_conf, &resolver_picker, &http).await?;
 
         let relay_client = relay_pciker.pick();
         let relay_resp = resolve_domain_via_relay(
@@ -363,9 +391,7 @@ async fn resolve(
             }
         }
     } else {
-        let resolved = resolver_picker
-            .resolve(domain, resolver, &http)
-            .await?;
+        let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
         if resolved.is_empty() {
             println!(";; no A records found for {domain}");
         } else {

@@ -144,6 +144,19 @@ impl ResolverPicker {
         let healthy_resolvers = self.healthy_resolvers.read().unwrap();
         healthy_resolvers[0].clone().0
     }
+    pub fn pick_doh_first(&self, prefer_doh: bool) -> String {
+        if prefer_doh {
+            let healthy_resolvers = self.healthy_resolvers.read().unwrap();
+            if let Some((addr, _)) = healthy_resolvers
+                .iter()
+                .find(|(addr, _)| addr.starts_with("https://"))
+            {
+                return addr.clone();
+            }
+            // no DoH resolver configured/healthy — fall through to normal pick
+        }
+        self.pick()
+    }
     pub async fn resolve(
         &self,
         domain: &str,

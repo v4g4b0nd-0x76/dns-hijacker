@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, atomic::Ordering::Relaxed},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
 };
 
 use crate::{
@@ -89,6 +92,7 @@ pub struct HandleQueryParams<'a> {
     pub cache: &'a ResponseCache,
     pub relay_picker: Option<&'a RelayPicker>,
     pub metric_wrapper: Option<&'a Arc<MetricWrapper>>,
+    pub is_vpn_active: &'a Arc<AtomicBool>,
 }
 macro_rules! incr_metric {
     ($metric:expr, $field:ident) => {
@@ -109,6 +113,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         cache,
         relay_picker,
         metric_wrapper,
+        is_vpn_active,
     } = *params;
 
     if payload.len() < 12 {
@@ -162,7 +167,9 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         .await
         .unwrap_or(Err(Error::ResolveTimeout))
     } else {
-        let resolver = resolver_picker.pick();
+        let resolver = resolver_picker
+            .pick_doh_first(is_vpn_active.load(std::sync::atomic::Ordering::Relaxed));
+
         timeout(
             RESOLVE_TIMEOUT,
             resolve_from_upstream(payload, &resolver, src_addr, http),

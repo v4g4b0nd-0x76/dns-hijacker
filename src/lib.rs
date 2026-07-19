@@ -9,6 +9,7 @@ pub mod logger;
 pub mod metric_wrapper;
 pub mod relay;
 pub mod resolver;
+pub mod netguard;
 pub use cache::{ResponseCache, new_cache};
 pub use conf::{Conf, load_conf};
 pub use errors::{DohError, Error};
@@ -39,7 +40,11 @@ pub mod constants {
     pub const MAX_BACKLOG_AGE_MS: u64 = 800; // drop entries older than this (client will have retried)
 
     pub const SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024; // 4MB
-
+    pub const NETGUARD_POLL_INTERVAL_MS: u64 = 1500;
+    pub const DNS_TARGET: &str = "127.0.0.1";
+    /// Interface name prefixes used by macOS VPN clients (WireGuard/OpenVPN utun,
+    /// IPSec, PPP-based). Covers Windscribe, NordVPN, Mullvad, ProtonVPN, etc.
+    pub const VPN_IFACE_PREFIXES: &[&str] = &["utun", "ipsec", "ppp", "tun", "tap"];
     /// Minimal DNS query for `google.com` A record, used as a health-check probe.
     pub const DNS_PROBE_PACKET: &[u8] = &[
         0xAA, 0xBB, // Transaction ID
