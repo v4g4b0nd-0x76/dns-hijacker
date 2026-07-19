@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "dns-hijacker"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -309,6 +309,7 @@ dependencies = [
  "rand",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2",
  "socket2 0.5.10",
  "tokio",

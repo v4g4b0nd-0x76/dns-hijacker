@@ -130,6 +130,8 @@ report_type = "log"
 report_interval = 30 # number of second for each log
 ```
 
+for report type of `http` you can access health check route at `http://127.0.0.1:5053/health` and metrics in `http://127.0.0.1:5053/metrics`
+
 **Note: in console mode for not logging when there is no activity a new log will be shown whenever there is difference between request count from previous interval**
 
 ### Limits worth knowing
