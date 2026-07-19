@@ -74,7 +74,7 @@ async fn call_handle_query(
         cache,
         relay_picker: None,
         metric_wrapper,
-        is_vpn_active:&is_vpn_active
+        is_vpn_active: &is_vpn_active,
     };
     handle_query(&params).await;
 }

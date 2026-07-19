@@ -134,6 +134,46 @@ for report type of `http` you can access health check route at `http://127.0.0.1
 
 **Note: in console mode for not logging when there is no activity a new log will be shown whenever there is difference between request count from previous interval**
 
+### VPN resilience
+
+VPN clients with a kill switch (Windscribe, NordVPN, Mullvad, etc.) tend to
+do two things that fight a local resolver like this one:
+
+1. **Firewall non-tunnel UDP traffic**, including outbound queries this tool
+   sends to plain `ip:port` resolvers on port 53 — even though that traffic
+   is legitimate, it looks identical to a DNS leak.
+2. **Overwrite system DNS** with their own resolver the moment they connect,
+   so the OS stops sending queries here at all — bypassing the drop/redirect
+   lists entirely.
+
+Two features address this automatically, no configuration required:
+
+- **DoH-first resolution**: if a VPN interface is detected, the picker
+  prefers any `https://` entry in your `resolvers` list over plain UDP ones,
+  since DoH traffic is ordinary HTTPS and essentially never blocked by a kill
+  switch. Make sure at least one DoH resolver is configured (see the
+  `resolvers` example above) for this to have something to fall back to.
+- **DNS reassertion (netguard)**: a background loop detects VPN interfaces
+  (`utun*`, `wg*`, `tun*`, etc.) and continuously re-points system DNS back
+  at this resolver:
+  - **macOS**: reasserts DNS on every network service via `networksetup`,
+    *and* directly overwrites the live `State:/Network/Service/<id>/DNS`
+    entry via `scutil` for whichever service is currently primary — this is
+    the config VPN clients actually hijack, which plain `networksetup`
+    calls alone don't reach.
+  - **Linux**: uses `resolvectl` (systemd-resolved) if available, applying
+    both the resolver and a `~.` default-route domain to every link; falls
+    back to rewriting `/etc/resolv.conf` directly if `resolvectl` isn't
+    present.
+
+This runs as a continuous poll (roughly every 1.5s), since VPN clients
+reassert their own DNS on their own schedule too — expect a brief window on
+connect/reconnect before this resolver wins the config back.
+
+**Requires root/sudo** (or the `setcap` capability described above, though
+`networksetup`/`resolvectl` calls specifically may still need elevated
+privileges depending on your OS's policy).
+
 ### Limits worth knowing
 
 Google Apps Script has real quotas (roughly 20,000 outbound fetches/day on a free account, a several-minute execution budget per call, and no built-in high-concurrency handling), and adds noticeably more latency per request than a Cloudflare Worker alone. The built-in per-hop caching helps offset this for repeat lookups, but it's not a drop-in replacement for Cloudflare's own scaling — treat it as a fallback path for when Cloudflare itself is unreachable, not a primary one.
