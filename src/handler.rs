@@ -4,11 +4,9 @@ use std::{
     sync::{Arc, atomic::Ordering::Relaxed},
 };
 
-use tokio::{net::UdpSocket, time::timeout};
-
 use crate::{
     cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
-    constants::{RESOLVE_TIMEOUT, SOCKET_BUF_SIZE},
+    constants::{RESOLVE_TIMEOUT, SOCKET_RCVBUF_BYTES},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response, parse_domain,
         with_txid,
@@ -18,26 +16,44 @@ use crate::{
     relay::RelayPicker,
     resolver::{ResolverPicker, resolve_from_upstream},
 };
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, error, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
-    use socket2::{Domain, Protocol, Socket, Type};
-
-    let addr: SocketAddr = addr
+    let sock_addr: SocketAddr = addr
         .parse()
-        .map_err(|err| Error::Config(format!("invalid listen address {addr}: {err}")))?;
-    let domain = if addr.is_ipv4() {
+        .map_err(|e| Error::Other(format!("bad addr: {e}")))?;
+    let domain = if sock_addr.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
     };
-    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    let _ = socket.set_recv_buffer_size(SOCKET_BUF_SIZE);
-    let _ = socket.set_send_buffer_size(SOCKET_BUF_SIZE);
-    socket.bind(&addr.into())?;
-    socket.set_nonblocking(true)?;
-    Ok(UdpSocket::from_std(socket.into())?)
+
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+        .map_err(|e| Error::Other(format!("failed to create socket: {e}")))?;
+
+    // Critical for macOS: default kernel recv buffer is too small for a resolver-switch burst.
+    // Without this, packets are dropped by the kernel before recv_from ever sees them.
+    if let Err(e) = socket.set_recv_buffer_size(SOCKET_RCVBUF_BYTES) {
+        warn!("failed to set SO_RCVBUF to {SOCKET_RCVBUF_BYTES}: {e}");
+    }
+    socket.set_reuse_address(true).ok();
+
+    socket
+        .bind(&sock_addr.into())
+        .map_err(|e| Error::Other(format!("failed to bind: {e}")))?;
+
+    // Must be non-blocking BEFORE handing to tokio, or UdpSocket::from_std will reject it.
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| Error::Other(format!("failed to set nonblocking: {e}")))?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+
+    // Requires an active Tokio runtime context (fine here — always called from within #[tokio::main]).
+    tokio::net::UdpSocket::from_std(std_socket)
+        .map_err(|e| Error::Other(format!("failed to convert to tokio socket: {e}")))
 }
 enum RuleMatch {
     Drop,
@@ -151,7 +167,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         let resolver = resolver_picker.pick();
         timeout(
             RESOLVE_TIMEOUT,
-            resolve_from_upstream(payload, &resolver, src_addr, http, socket),
+            resolve_from_upstream(payload, &resolver, src_addr, http),
         )
         .await
         .unwrap_or(Err(Error::ResolveTimeout))

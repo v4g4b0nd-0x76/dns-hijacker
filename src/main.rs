@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, handler::{DomainTrie, HandleQueryParams}, helpers::clear_screen,  init_logger, load_conf, metric_wrapper::MetricWrapper, new_cache, relay::{RelayPicker, resolve_domain_via_relay}, resolver::Resolver, run_resolver_finder
+    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{BACKLOG_CAPACITY, LOCAL_DNS, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, handler::{DomainTrie, HandleQueryParams}, helpers::clear_screen,  init_logger, load_conf, metric_wrapper::MetricWrapper, new_cache, relay::{RelayPicker, resolve_domain_via_relay}, resolver::Resolver, run_resolver_finder
 };
 use std::{
     io,
@@ -71,6 +71,7 @@ async fn main() -> Result<(), Error> {
     }
 }
 
+
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
     let cache = Arc::new(new_cache());
@@ -79,9 +80,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let metric_wrapper = Arc::new(MetricWrapper::new());
         let metric_report_wrapper = Arc::clone(&metric_wrapper);
         tokio::spawn(async move {
-            metric_report_wrapper
-                .start_reporting(&metric_conf)
-                .await;
+            metric_report_wrapper.start_reporting(&metric_conf).await;
         });
         Some(metric_wrapper)
     } else {
@@ -144,8 +143,81 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             }
         });
     }
+
+    // bind_udp_socket now sets SO_RCVBUF internally (see updated fn) — this is what
+    // stops the macOS burst from being dropped at the kernel level before you ever see it.
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
+
+    // Bounded backlog: absorbs bursts (like macOS's flush-and-reresolve-everything on
+    // resolver switch) instead of hard-dropping the moment the semaphore is exhausted.
+    let (backlog_tx, mut backlog_rx) =
+        tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr, tokio::time::Instant)>(
+            BACKLOG_CAPACITY,
+        );
+
+    {
+        let resolve_sem = Arc::clone(&resolve_sem);
+        let rule_trie = Arc::clone(&rule_trie);
+        let http = http.clone();
+        let resolver_picker = resolver_picker.clone();
+        let server_socket = Arc::clone(&server_socket);
+        let cache = Arc::clone(&cache);
+        let relay_picker = relay_pciker.clone();
+        let metric_wrapper = metric_wrapper.clone();
+        let receiver_socket = Arc::clone(&receiver_socket);
+        let max_age = Duration::from_millis(MAX_BACKLOG_AGE_MS);
+
+        tokio::spawn(async move {
+            loop {
+                let (payload, src_addr) = loop {
+                    match backlog_rx.recv().await {
+                        Some((payload, src_addr, enqueued_at)) => {
+                            if enqueued_at.elapsed() > max_age {
+                                // client (e.g. macOS mDNSResponder) has almost certainly
+                                // already retried or given up on this one — skip it.
+                                warn!("dropping stale backlogged query ({:?} old)", enqueued_at.elapsed());
+                                continue;
+                            }
+                            break (payload, src_addr);
+                        }
+                        None => return,
+                    }
+                };
+
+                let Ok(permit) = resolve_sem.clone().acquire_owned().await else {
+                    return;
+                };
+
+                let rule_trie = rule_trie.load_full();
+                let http = http.clone();
+                let resolver_picker = resolver_picker.clone();
+                let server_socket = Arc::clone(&server_socket);
+                let cache = Arc::clone(&cache);
+                let relay_picker = relay_picker.clone();
+                let metric_wrapper = metric_wrapper.clone();
+                let socket = Arc::clone(&receiver_socket);
+
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let params = HandleQueryParams {
+                        payload: &payload,
+                        src_addr,
+                        rule_trie: &rule_trie,
+                        resolver_picker: &resolver_picker,
+                        server_socket: &server_socket,
+                        http: &http,
+                        cache: &cache,
+                        relay_picker: relay_picker.as_deref(),
+                        socket: &socket,
+                        metric_wrapper: metric_wrapper.as_ref(),
+                    };
+                    handle_query(&params).await;
+                });
+            }
+        });
+    }
+
     info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
@@ -175,7 +247,17 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         for (payload, src_addr) in batch {
             let receiver_socket = receiver_socket.clone();
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
-                warn!("reached semaphore maximum");
+                // Instead of dropping outright, push to the bounded backlog.
+                match backlog_tx.try_send((payload, src_addr, tokio::time::Instant::now())) {
+                    Ok(_) => {
+                        if let Some(m) = metric_wrapper.as_ref() {
+                            m.total_req.fetch_add(0, Relaxed); // or add a dedicated `backlogged` counter
+                        }
+                    }
+                    Err(_) => {
+                        warn!("semaphore and backlog both full, dropping query");
+                    }
+                }
                 continue;
             };
             let rule_trie = rule_trie.load_full();
@@ -188,7 +270,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
             tokio::spawn(async move {
                 let _permit = permit;
-
                 let params = HandleQueryParams {
                     payload: &payload,
                     src_addr,
@@ -296,7 +377,7 @@ async fn resolve(
         }
     } else {
         let resolved = resolver_picker
-            .resolve(domain, resolver, &http, &receiver_socket)
+            .resolve(domain, resolver, &http)
             .await?;
         // clear_screen();
         if resolved.is_empty() {

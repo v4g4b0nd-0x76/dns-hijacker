@@ -236,7 +236,7 @@ impl RelayInstance {
         })?;
         let ipv4: Option<Vec<Ipv4Addr>> = if resolve_ipv4 {
             let resolved = resolver_picker
-                .resolve(&relay_host, None, http,socket)
+                .resolve(&relay_host, None, http)
                 .await
                 .map_err(|err| {
                     let msg = format!("failed to resolve relay host {}: {}", relay_host, err);

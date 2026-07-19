@@ -24,7 +24,7 @@ use crate::{
     },
     dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
-    helpers::get_public_ip
+    helpers::get_public_ip,
 };
 use tracing::{debug, error, info, warn};
 
@@ -149,7 +149,6 @@ impl ResolverPicker {
         domain: &str,
         resolver: Option<String>,
         http: &reqwest::Client,
-        socket: &UdpSocket,
     ) -> Result<Vec<Ipv4Addr>, Error> {
         let resolver = resolver
             .map(|r| normalize_resolver(&r))
@@ -160,8 +159,7 @@ impl ResolverPicker {
         // close fallback
         let src_addr = SocketAddr::new(public_ip, 0);
         let query = build_lookup_query(domain);
-        let (reply, _len) =
-            resolve_from_upstream(&query, &resolver, src_addr, http, socket).await?;
+        let (reply, _len) = resolve_from_upstream(&query, &resolver, src_addr, http).await?;
         let ips = parse_a_records(&reply);
         Ok(ips)
     }
@@ -182,7 +180,6 @@ pub async fn resolve_from_upstream(
     upstream_resolver: &str,
     src_addr: SocketAddr,
     http: &reqwest::Client,
-    upstream_socket: &UdpSocket,
 ) -> Result<(Vec<u8>, usize), Error> {
     let final_payload = set_ecs_option(payload, src_addr, None).unwrap_or_else(|| payload.to_vec());
 
@@ -193,20 +190,31 @@ pub async fn resolve_from_upstream(
     let upstream_addr: SocketAddr = upstream_resolver
         .parse()
         .map_err(|_| Error::InvalidResolver(upstream_resolver.to_owned()))?;
+    let bind_addr = if upstream_addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
 
-    upstream_socket
-        .send_to(&final_payload, upstream_addr)
-        .await?;
+    let query_socket = UdpSocket::bind(bind_addr).await.map_err(Error::from)?;
+    query_socket
+        .connect(upstream_addr)
+        .await
+        .map_err(Error::from)?;
+
+    query_socket
+        .send(&final_payload)
+        .await
+        .map_err(Error::from)?;
 
     let mut reply_buf = [0u8; 4096];
-    let (reply_len, _) = timeout(RESOLVE_TIMEOUT, upstream_socket.recv_from(&mut reply_buf))
+    let reply_len = timeout(RESOLVE_TIMEOUT, query_socket.recv(&mut reply_buf))
         .await
         .map_err(|_| Error::ResolveTimeout)?
         .map_err(Error::from)?;
 
     Ok((reply_buf[..reply_len].to_vec(), reply_len))
 }
-
 pub async fn resolve_via_doh(
     http: &reqwest::Client,
     url: &str,
