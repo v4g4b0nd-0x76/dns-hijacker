@@ -24,7 +24,7 @@ use crate::{
     },
     dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
-    helpers::get_public_ip,
+    helpers::get_public_ip
 };
 use tracing::{debug, error, info, warn};
 

@@ -20,6 +20,27 @@ pub struct Conf {
     pub hotreload_conf: HotreloadConf,
     #[serde(default)]
     pub relay_conf: RelayConf,
+    #[serde(default)]
+    pub metric_conf: MetricConf,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricReportType {
+    #[default]
+    Log,
+    Http,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct MetricConf {
+    pub enable: bool,
+    pub report_type: MetricReportType,
+    #[serde(default = "default_report_interval")]
+    pub report_interval: u64,
+}
+fn default_report_interval() -> u64 {
+    30
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -131,7 +152,7 @@ pub async fn watch_conf_and_reload(
             Ok(new_conf) => {
                 let drop_list_clone = new_conf.drop_list.clone();
                 let new_trie = DomainTrie::build(&new_conf.drop_list, &new_conf.redirect_list);
-               rule_trie.store(Arc::new(new_trie));
+                rule_trie.store(Arc::new(new_trie));
                 remove_domains_from_cache(&cache, &drop_list_clone);
                 *conf.write().unwrap() = new_conf;
 

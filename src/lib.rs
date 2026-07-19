@@ -8,7 +8,7 @@ pub mod handler;
 pub mod logger;
 pub mod resolver;
 pub mod relay;
-
+pub mod metric_wrapper;
 pub use cache::{ResponseCache, new_cache};
 pub use conf::{Conf, load_conf};
 pub use errors::{DohError, Error};

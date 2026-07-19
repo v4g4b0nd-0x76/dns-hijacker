@@ -104,7 +104,7 @@ transport = "google_chained"
 
 A direct Cloudflare Worker relay is simple and fast, but in some networks (this was built with Iranian ISP-level filtering in mind) Cloudflare's own IP ranges get blocked outright while Google's generally don't. The `google_chained` transport exists for that case: the same encrypted DNS packet gets wrapped in one more hop — a small Google Apps Script web app — before reaching the Cloudflare Worker. Apps Script runs on Google's own infrastructure, not your network, so if Google is reachable but Cloudflare isn't, this extra hop gets you there anyway.
 
-Both transports use the *same* `relay_key` semantics: it's always the AES-256-GCM key shared between the Rust client and the Cloudflare Worker that actually performs the DNS-over-HTTPS lookup. The Google Apps Script hop, when used, never sees this key and can't decrypt anything — it only ever handles already-encrypted, base64-wrapped ciphertext, plus an opaque cache tag (an HMAC of the domain, derived from the same key) that lets it cache repeat lookups without ever learning what domain was actually queried.
+Both transports use the _same_ `relay_key` semantics: it's always the AES-256-GCM key shared between the Rust client and the Cloudflare Worker that actually performs the DNS-over-HTTPS lookup. The Google Apps Script hop, when used, never sees this key and can't decrypt anything — it only ever handles already-encrypted, base64-wrapped ciphertext, plus an opaque cache tag (an HMAC of the domain, derived from the same key) that lets it cache repeat lookups without ever learning what domain was actually queried.
 
 ### Setting up a Cloudflare Worker (direct transport)
 
@@ -118,8 +118,19 @@ Both transports use the *same* `relay_key` semantics: it's always the AES-256-GC
 1. In [script.google.com](https://script.google.com), create a new project. It needs a `doPost` handler that: reads a JSON body containing the base64-encoded encrypted packet and a cache-key tag, checks its own cache for that tag, and if not cached, forwards the decoded bytes to your Cloudflare Worker's URL via `UrlFetchApp`, then caches and returns the Worker's (still-encrypted) response.
 2. Store the actual Cloudflare Worker URL in the project's **Script Properties** (`Project Settings → Script Properties`), not hardcoded in the script and not sent by the client — this keeps the deployment from being usable as an open relay to arbitrary destinations.
 3. Deploy it as a **Web app** (`Deploy → New deployment → Web app`), with **Execute as: Me** and **Who has access: Anyone** — the "Anyone" setting is required since the Rust client calls it anonymously, with no Google login.
-4. Copy the resulting `.../exec` URL (this includes the deployment ID — there's no separate place to configure that) into `conf.toml` as `relay_url`, alongside the *same* `relay_key` used by the underlying Worker, with `transport = "google_chained"`.
+4. Copy the resulting `.../exec` URL (this includes the deployment ID — there's no separate place to configure that) into `conf.toml` as `relay_url`, alongside the _same_ `relay_key` used by the underlying Worker, with `transport = "google_chained"`.
 5. If you edit the script later, redeploying as a **new version of the existing deployment** (rather than a brand-new deployment) keeps the same `.../exec` URL, so `conf.toml` doesn't need updating each time.
+
+### Metrics 
+You can see the behaviour of resolver using metrics option in configs by enabling it and setting the report type form terminal `LOG` or `/metrics` http endpoint
+```toml
+[metric_conf]
+enable = true
+report_type = "log"
+report_interval = 30 # number of second for each log
+```
+
+**Note: in console mode for not logging when there is no activity a new log will be shown whenever there is difference between request count from previous interval**
 
 ### Limits worth knowing
 
@@ -128,7 +139,3 @@ Google Apps Script has real quotas (roughly 20,000 outbound fetches/day on a fre
 ## CLI
 
 Aside from running the server, there are a couple of standalone commands for setup and troubleshooting — generating a relay key, and resolving a single domain (optionally through a relay) without running the full server. Exact flag names may vary by version; check `--help` on your build for the authoritative list.
-
-## A note on scope
-
-This is a simple, personal-use tool, not a hardened production resolver — there's no built-in DNSSEC validation, and the filtering (drop/redirect lists) is pattern-based rather than anything more sophisticated. The README's own TODO list reflects this: replacing blocking `println!` calls with proper tracing, and adding resolver auto-discovery, are both still open.

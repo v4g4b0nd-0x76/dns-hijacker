@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, atomic::Ordering::Relaxed},
+};
 
 use tokio::{net::UdpSocket, time::timeout};
 
@@ -10,6 +14,7 @@ use crate::{
         with_txid,
     },
     errors::Error,
+    metric_wrapper::MetricWrapper,
     relay::RelayPicker,
     resolver::{ResolverPicker, resolve_from_upstream},
 };
@@ -68,6 +73,14 @@ pub struct HandleQueryParams<'a> {
     pub cache: &'a ResponseCache,
     pub relay_picker: Option<&'a RelayPicker>,
     pub socket: &'a Arc<UdpSocket>,
+    pub metric_wrapper: Option<&'a Arc<MetricWrapper>>,
+}
+macro_rules! incr_metric {
+    ($metric:expr, $field:ident) => {
+        if let Some(m) = $metric {
+            m.$field.fetch_add(1, Relaxed);
+        }
+    };
 }
 
 pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
@@ -81,6 +94,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         cache,
         relay_picker,
         socket,
+        metric_wrapper,
     } = *params;
 
     if payload.len() < 12 {
@@ -96,6 +110,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         RuleMatch::Drop => {
             warn!("[Dropped] {}", domain);
             if let Some(resp) = craft_nxdomain_response(payload) {
+                incr_metric!(metric_wrapper, drop_count);
                 send(server_socket, src_addr, resp).await;
             }
             return;
@@ -104,6 +119,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
             let ip_refs: Vec<&str> = ips.iter().map(String::as_str).collect();
             warn!("[REDIRECT] {} -> {:?}", domain, ip_refs);
             if let Some(resp) = craft_redirect_response(payload, qname_end, ip_refs) {
+                incr_metric!(metric_wrapper, redirect_count);
                 send(server_socket, src_addr, resp).await;
             }
             return;
@@ -118,6 +134,8 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
 
     if let Some(cached) = cache_lookup(cache, &cache_key) {
         debug!("[CACHE HIT] {}", domain);
+
+        incr_metric!(metric_wrapper, cached_count);
         send(server_socket, src_addr, with_txid(cached, req_txid)).await;
         return;
     }
@@ -143,6 +161,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
     match resolve_result {
         Ok(reply_buf) => {
             cache_store(cache, cache_key, &reply_buf);
+            incr_metric!(metric_wrapper, resolved_count);
             send(server_socket, src_addr, with_txid(reply_buf, req_txid)).await;
         }
         Err(Error::ResolveTimeout) => {
@@ -150,10 +169,12 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
                 "resolve timed out for {} after {:?}",
                 domain, RESOLVE_TIMEOUT
             );
+            incr_metric!(metric_wrapper, timeout_count);
             send_servfail(server_socket, src_addr, payload).await;
         }
         Err(err) => {
             error!("failed to resolve {}: {}", domain, err);
+            incr_metric!(metric_wrapper, failed_count);
             send_servfail(server_socket, src_addr, payload).await;
         }
     }

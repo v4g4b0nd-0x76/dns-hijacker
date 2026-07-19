@@ -1,21 +1,12 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client,
-    conf::watch_conf_and_reload,
-    constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
-    gen_relay_key, handle_query,
-    handler::{DomainTrie, HandleQueryParams},
-    helpers::clear_screen,
-    init_logger, load_conf, new_cache,
-    relay::{RelayPicker, resolve_domain_via_relay},
-    resolver::Resolver,
-    run_resolver_finder,
+    Error, ResolverPicker, bind_udp_socket, build_http_client, conf::watch_conf_and_reload, constants::{LOCAL_DNS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE}, gen_relay_key, handle_query, handler::{DomainTrie, HandleQueryParams}, helpers::clear_screen,  init_logger, load_conf, metric_wrapper::MetricWrapper, new_cache, relay::{RelayPicker, resolve_domain_via_relay}, resolver::Resolver, run_resolver_finder
 };
 use std::{
     io,
     path::PathBuf,
-    sync::{Arc, RwLock, atomic::AtomicBool},
+    sync::{Arc, RwLock, atomic::{AtomicBool , Ordering::Relaxed}},
     time::Duration,
 };
 use tokio::{net::UdpSocket, sync::Semaphore};
@@ -83,6 +74,19 @@ async fn main() -> Result<(), Error> {
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
     let cache = Arc::new(new_cache());
+    let metric_conf = conf.read().unwrap().metric_conf.clone();
+    let metric_wrapper = if metric_conf.enable {
+        let metric_wrapper = Arc::new(MetricWrapper::new());
+        let metric_report_wrapper = Arc::clone(&metric_wrapper);
+        tokio::spawn(async move {
+            metric_report_wrapper
+                .start_reporting(&metric_conf)
+                .await;
+        });
+        Some(metric_wrapper)
+    } else {
+        None
+    };
 
     let hotreload_conf = {
         let conf_read = conf.read().unwrap();
@@ -165,6 +169,9 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 }
             }
         }
+        if let Some(metric_wrapper) = metric_wrapper.as_ref() {
+            metric_wrapper.total_req.fetch_add(batch.len() as u64, Relaxed);
+        }
         for (payload, src_addr) in batch {
             let receiver_socket = receiver_socket.clone();
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
@@ -177,6 +184,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let server_socket = Arc::clone(&server_socket);
             let cache = Arc::clone(&cache);
             let relay_picker = relay_pciker.clone();
+            let metric_wrapper = metric_wrapper.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -191,6 +199,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     cache: &cache,
                     relay_picker: relay_picker.as_deref(),
                     socket: &receiver_socket,
+                    metric_wrapper: metric_wrapper.as_ref(),
                 };
                 handle_query(&params).await;
             });

@@ -16,9 +16,11 @@ use crate::{
     conf::Conf,
     constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
-        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl, parse_domain, set_ecs_option, with_txid
+        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl,
+        parse_domain, set_ecs_option, with_txid,
     },
     handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, handle_query},
+    metric_wrapper::MetricWrapper,
     relay::{RelayInstance, RelayPicker},
     resolver::{ResolverPicker, create_resolver},
 };
@@ -65,6 +67,7 @@ async fn call_handle_query(
             .await
             .expect("failed to bind udp socket"),
     );
+    let metric_wrapper = Some(&(Arc::new(MetricWrapper::new())));
     let params = HandleQueryParams {
         payload,
         src_addr,
@@ -75,6 +78,7 @@ async fn call_handle_query(
         cache,
         relay_picker: None,
         socket: &socket,
+        metric_wrapper,
     };
     handle_query(&params).await;
 }
