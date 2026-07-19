@@ -62,11 +62,6 @@ async fn call_handle_query(
     http: &reqwest::Client,
     cache: &ResponseCache,
 ) {
-    let socket = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
-            .await
-            .expect("failed to bind udp socket"),
-    );
     let metric_wrapper = Some(&(Arc::new(MetricWrapper::new())));
     let params = HandleQueryParams {
         payload,
@@ -77,7 +72,6 @@ async fn call_handle_query(
         http,
         cache,
         relay_picker: None,
-        socket: &socket,
         metric_wrapper,
     };
     handle_query(&params).await;
@@ -570,12 +564,7 @@ async fn relay_picker_new_rejects_empty_instances() {
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
-    let socket = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
-            .await
-            .expect("failed to bind socket"),
-    );
 
-    let result = RelayPicker::new(&conf, &picker, &http, &socket).await;
+    let result = RelayPicker::new(&conf, &picker, &http).await;
     assert!(result.is_err());
 }

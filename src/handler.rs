@@ -88,7 +88,6 @@ pub struct HandleQueryParams<'a> {
     pub http: &'a reqwest::Client,
     pub cache: &'a ResponseCache,
     pub relay_picker: Option<&'a RelayPicker>,
-    pub socket: &'a Arc<UdpSocket>,
     pub metric_wrapper: Option<&'a Arc<MetricWrapper>>,
 }
 macro_rules! incr_metric {
@@ -109,7 +108,6 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         http,
         cache,
         relay_picker,
-        socket,
         metric_wrapper,
     } = *params;
 

@@ -127,7 +127,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         ResolverPicker::new(initial_resolvers, http.clone(), &receiver_socket).await?;
     let relay_pciker = if relay_conf.enable {
         Some(Arc::new(
-            RelayPicker::new(&relay_conf, &resolver_picker, &http, &receiver_socket).await?,
+            RelayPicker::new(&relay_conf, &resolver_picker, &http).await?,
         ))
     } else {
         None
@@ -144,13 +144,9 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         });
     }
 
-    // bind_udp_socket now sets SO_RCVBUF internally (see updated fn) — this is what
-    // stops the macOS burst from being dropped at the kernel level before you ever see it.
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
 
-    // Bounded backlog: absorbs bursts (like macOS's flush-and-reresolve-everything on
-    // resolver switch) instead of hard-dropping the moment the semaphore is exhausted.
     let (backlog_tx, mut backlog_rx) =
         tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr, tokio::time::Instant)>(
             BACKLOG_CAPACITY,
@@ -165,7 +161,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let cache = Arc::clone(&cache);
         let relay_picker = relay_pciker.clone();
         let metric_wrapper = metric_wrapper.clone();
-        let receiver_socket = Arc::clone(&receiver_socket);
         let max_age = Duration::from_millis(MAX_BACKLOG_AGE_MS);
 
         tokio::spawn(async move {
@@ -174,8 +169,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     match backlog_rx.recv().await {
                         Some((payload, src_addr, enqueued_at)) => {
                             if enqueued_at.elapsed() > max_age {
-                                // client (e.g. macOS mDNSResponder) has almost certainly
-                                // already retried or given up on this one — skip it.
                                 warn!("dropping stale backlogged query ({:?} old)", enqueued_at.elapsed());
                                 continue;
                             }
@@ -196,7 +189,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 let cache = Arc::clone(&cache);
                 let relay_picker = relay_picker.clone();
                 let metric_wrapper = metric_wrapper.clone();
-                let socket = Arc::clone(&receiver_socket);
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -209,7 +201,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                         http: &http,
                         cache: &cache,
                         relay_picker: relay_picker.as_deref(),
-                        socket: &socket,
                         metric_wrapper: metric_wrapper.as_ref(),
                     };
                     handle_query(&params).await;
@@ -221,7 +212,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     info!("dns server listening at {}", LOCAL_DNS);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
-        let receiver_socket = receiver_socket.clone();
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {
             Ok(res) => res,
             Err(err) => {
@@ -245,13 +235,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             metric_wrapper.total_req.fetch_add(batch.len() as u64, Relaxed);
         }
         for (payload, src_addr) in batch {
-            let receiver_socket = receiver_socket.clone();
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
-                // Instead of dropping outright, push to the bounded backlog.
                 match backlog_tx.try_send((payload, src_addr, tokio::time::Instant::now())) {
                     Ok(_) => {
                         if let Some(m) = metric_wrapper.as_ref() {
-                            m.total_req.fetch_add(0, Relaxed); // or add a dedicated `backlogged` counter
+                            m.total_req.fetch_add(0, Relaxed); 
                         }
                     }
                     Err(_) => {
@@ -279,7 +267,6 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     http: &http,
                     cache: &cache,
                     relay_picker: relay_picker.as_deref(),
-                    socket: &receiver_socket,
                     metric_wrapper: metric_wrapper.as_ref(),
                 };
                 handle_query(&params).await;
@@ -357,7 +344,7 @@ async fn resolve(
         }
 
         let relay_pciker =
-            RelayPicker::new(&conf.relay_conf, &resolver_picker, &http, &receiver_socket).await?;
+            RelayPicker::new(&conf.relay_conf, &resolver_picker, &http).await?;
 
         let relay_client = relay_pciker.pick();
         let relay_resp = resolve_domain_via_relay(
@@ -379,7 +366,6 @@ async fn resolve(
         let resolved = resolver_picker
             .resolve(domain, resolver, &http)
             .await?;
-        // clear_screen();
         if resolved.is_empty() {
             println!(";; no A records found for {domain}");
         } else {
