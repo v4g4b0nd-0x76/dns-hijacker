@@ -18,7 +18,6 @@ use tracing::{info, warn};
 
 use crate::constants::NETGUARD_POLL_INTERVAL_MS;
 
-/// Runs forever. Call via `tokio::spawn`. Logs and keeps polling even if an
 /// individual check fails, since a transient tool hiccup shouldn't kill the guard.
 pub async fn run_network_guard(is_vpn_active: Arc<AtomicBool>) {
     let interval = Duration::from_millis(NETGUARD_POLL_INTERVAL_MS);
@@ -39,9 +38,6 @@ pub async fn revert() {
     platform::revert().await;
 }
 
-// ============================================================================
-// macOS backend
-// ============================================================================
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
@@ -65,7 +61,7 @@ mod platform {
 
     static TOUCHED: OnceLock<TokioMutex<TouchedState>> = OnceLock::new();
 
-    fn touched() -> &'static TokioMutex<TouchedState> {
+    async fn touched() -> &'static TokioMutex<TouchedState> {
         TOUCHED.get_or_init(|| {
             TokioMutex::new(TouchedState {
                 services: HashSet::new(),
@@ -274,9 +270,6 @@ mod platform {
     }
 }
 
-// ============================================================================
-// Linux backend
-// ============================================================================
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
