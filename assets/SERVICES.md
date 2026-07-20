@@ -23,6 +23,11 @@ sudo cp conf.toml /opt/dns-hijacker/
 sudo cp assets/dns_hijacker.service /etc/systemd/system/dns-hijacker.service
 sudo chown -R dns-hijacker:dns-hijacker /opt/dns-hijacker
 sudo chmod 755 /opt/dns-hijacker/dns-hijacker
+# 3) Allow the service user to reassert DNS via systemd-resolved without root.
+#    Required for netguard's VPN DNS-reassertion feature; skip this only if
+#    you don't need that (e.g. always-on VPN protection isn't a concern).
+sudo cp assets/49-dns-hijacker-resolved.rules /etc/polkit-1/rules.d/
+
 
 # 3) Enable + start
 sudo systemctl daemon-reload

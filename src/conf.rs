@@ -22,6 +22,8 @@ pub struct Conf {
     pub relay_conf: RelayConf,
     #[serde(default)]
     pub metric_conf: MetricConf,
+    #[serde(default = "default_vpn_reassertion")]
+    pub vpn_reassertion: bool
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -38,6 +40,9 @@ pub struct MetricConf {
     pub report_type: MetricReportType,
     #[serde(default = "default_report_interval")]
     pub report_interval: u64,
+}
+fn default_vpn_reassertion() -> bool {
+    false
 }
 fn default_report_interval() -> u64 {
     30

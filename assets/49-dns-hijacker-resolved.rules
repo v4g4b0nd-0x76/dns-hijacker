@@ -1,0 +1,11 @@
+// Allow the dns-hijacker service user to manage systemd-resolved link DNS
+// config without interactive authentication. resolvectl calls go over D-Bus
+// to systemd-resolved and are gated by polkit — this is NOT covered by
+// CAP_NET_BIND_SERVICE or any Linux capability, since it's not a syscall
+// privilege, it's a D-Bus authorization decision.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.resolve1.") === 0 &&
+        subject.user === "dns-hijacker") {
+        return polkit.Result.YES;
+    }
+});

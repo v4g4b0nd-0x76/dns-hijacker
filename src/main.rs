@@ -123,10 +123,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&rule_trie),
         Arc::clone(&cache),
     ));
-    let is_vpn_active = Arc::new(AtomicBool::new(false));
-    tokio::spawn(run_network_guard(Arc::clone(&is_vpn_active)));
     let http = build_http_client()?;
-    let (initial_resolvers, resolver_searching, searching_enabled, relay_conf) = {
+    let (initial_resolvers, resolver_searching, searching_enabled, relay_conf, vpn_reassertion) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.resolvers.clone(),
@@ -134,9 +132,17 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             conf_read.resolver_searching.enable
                 && !conf_read.resolver_searching.resolver_source.is_empty(),
             conf_read.relay_conf.clone(),
+            conf_read.vpn_reassertion,
         )
     };
 
+    let is_vpn_active = if vpn_reassertion {
+        let is_vpn_active = Arc::new(AtomicBool::new(false));
+        tokio::spawn(run_network_guard(Arc::clone(&is_vpn_active)));
+        is_vpn_active
+    } else {
+        Arc::new(AtomicBool::new(false))
+    };
     let receiver_socket = Arc::new(
         UdpSocket::bind("0.0.0.0:0")
             .await

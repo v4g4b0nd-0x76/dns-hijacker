@@ -1,7 +1,9 @@
 //! Watches for VPN clients rewriting system DNS or bringing up a tunnel
 //! interface, and reasserts our resolver as the system DNS. Platform-specific
 //! backends: macOS (networksetup + scutil State: override) and Linux
-//! (systemd-resolved via resolvectl, falling back to /etc/resolv.conf).
+//! (systemd-resolved via resolvectl). Only acts while a VPN interface is
+//! actually present, and reverts everything it changed when the VPN goes
+//! away or the process shuts down.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering::Relaxed},
@@ -30,26 +32,63 @@ pub async fn run_network_guard(is_vpn_active: Arc<AtomicBool>) {
     }
 }
 
+/// Undoes any DNS overrides netguard has applied. Call this on process
+/// shutdown (SIGINT/SIGTERM) so we never leave the system pointed at
+/// 127.0.0.1 after this process stops running and can't answer queries.
+pub async fn revert() {
+    platform::revert().await;
+}
+
 // ============================================================================
 // macOS backend
 // ============================================================================
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
+    use std::{
+        collections::HashSet,
+        process::Stdio,
+        sync::OnceLock,
+    };
+    use tokio::{io::AsyncWriteExt, sync::Mutex as TokioMutex};
     use tracing::debug;
 
     use crate::constants::{DNS_TARGET, VPN_IFACE_PREFIXES};
 
+    /// Network services we've overridden DNS on, plus whether we've set a
+    /// scutil State: override (and for which service id) — needed to revert
+    /// exactly what we changed, nothing more.
+    struct TouchedState {
+        services: HashSet<String>,
+        scutil_service_id: Option<String>,
+    }
+
+    static TOUCHED: OnceLock<TokioMutex<TouchedState>> = OnceLock::new();
+
+    fn touched() -> &'static TokioMutex<TouchedState> {
+        TOUCHED.get_or_init(|| {
+            TokioMutex::new(TouchedState {
+                services: HashSet::new(),
+                scutil_service_id: None,
+            })
+        })
+    }
+
     pub async fn tick(is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
         let vpn_now = detect_vpn_interface().await?;
         let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
-        if vpn_now != vpn_was {
-            info!(
-                "[NETGUARD] VPN interface {}",
-                if vpn_now { "detected" } else { "no longer detected" }
-            );
+
+        if vpn_now && !vpn_was {
+            info!("[NETGUARD] VPN interface detected");
+        } else if !vpn_now && vpn_was {
+            info!("[NETGUARD] VPN interface no longer detected — reverting DNS overrides");
+            revert().await;
+            return Ok(());
+        }
+
+        if !vpn_now {
+            // No VPN present — leave system DNS exactly as macOS/DHCP set it.
+            return Ok(());
         }
 
         if let Some(primary_id) = get_primary_service_id().await {
@@ -57,10 +96,43 @@ mod platform {
                 warn!("[NETGUARD] failed to force primary State DNS: {e}");
             } else {
                 debug!("[NETGUARD] forced State:/Network/Service/{primary_id}/DNS -> {DNS_TARGET}");
+                touched().await.lock().await.scutil_service_id = Some(primary_id);
             }
         }
 
         reassert_dns_on_all_services().await
+    }
+
+    /// Undoes every override we've applied: clears the scutil State:
+    /// override and resets each touched service back to automatic (DHCP) DNS.
+    pub async fn revert() {
+        let mut state = touched().await.lock().await;
+
+        if let Some(service_id) = state.scutil_service_id.take() {
+            let script = format!("remove State:/Network/Service/{service_id}/DNS\n");
+            if let Err(e) = run_scutil_script(&script).await {
+                warn!("[NETGUARD] failed to remove scutil State override: {e}");
+            } else {
+                info!("[NETGUARD] removed scutil State:/Network/Service/{service_id}/DNS override");
+            }
+        }
+
+        for service in state.services.drain() {
+            let result = Command::new("networksetup")
+                .args(["-setdnsservers", &service, "Empty"])
+                .output()
+                .await;
+            match result {
+                Ok(out) if out.status.success() => {
+                    info!("[NETGUARD] {service}: DNS reverted to automatic (DHCP)");
+                }
+                Ok(out) => warn!(
+                    "[NETGUARD] {service}: revert failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(err) => warn!("[NETGUARD] {service}: failed to run networksetup revert: {err}"),
+            }
+        }
     }
 
     /// Lists interfaces via `ifconfig` and checks for any VPN-prefixed interface
@@ -97,8 +169,6 @@ mod platform {
         Ok(false)
     }
 
-    /// Lists all enabled network services and forces DNS back to 127.0.0.1 on
-    /// any that have drifted (VPN client having just overwritten it).
     async fn reassert_dns_on_all_services() -> Result<(), String> {
         let list_output = Command::new("networksetup")
             .arg("-listallnetworkservices")
@@ -138,6 +208,7 @@ mod platform {
 
         if already_correct {
             debug!("[NETGUARD] {service}: DNS already {DNS_TARGET}, skipping");
+            touched().await.lock().await.services.insert(service.to_string());
             return;
         }
 
@@ -150,6 +221,7 @@ mod platform {
         match result {
             Ok(out) if out.status.success() => {
                 info!("[NETGUARD] {service}: DNS reasserted to {DNS_TARGET}");
+                touched().await.lock().await.services.insert(service.to_string());
             }
             Ok(out) => {
                 warn!(
@@ -193,11 +265,6 @@ mod platform {
             .map(|s| s.trim().to_string())
     }
 
-    /// Directly overwrites the LIVE (State:) DNS entry for whatever service
-    /// configd currently considers primary — this is what Windscribe (and other
-    /// VPN clients) hijack to install their own resolver ahead of anything
-    /// `networksetup` can touch, since networksetup only writes persistent
-    /// Setup: config, not the live State: config configd actually resolves from.
     async fn force_primary_dns_state(service_id: &str) -> Result<(), String> {
         let script = format!(
             "d.init\nd.add ServerAddresses * {DNS_TARGET}\nset State:/Network/Service/{service_id}/DNS\n"
@@ -213,27 +280,82 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
-    use tokio::fs;
+    use std::{collections::HashSet, sync::OnceLock};
+    use tokio::sync::Mutex as TokioMutex;
     use tracing::debug;
 
     use crate::constants::{DNS_TARGET, VPN_IFACE_PREFIXES};
 
-    pub async fn tick(is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
-        let vpn_now = detect_vpn_interface().await?;
-        let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
-        if vpn_now != vpn_was {
-            info!(
-                "[NETGUARD] VPN interface {}",
-                if vpn_now { "detected" } else { "no longer detected" }
-            );
-        }
+    /// Interfaces we've set DNS on via resolvectl — tracked so `revert()`
+    /// touches exactly these, nothing else (never docker0/br-*/veth*, etc).
+    static TOUCHED_LINKS: OnceLock<TokioMutex<HashSet<String>>> = OnceLock::new();
 
-        reassert_dns().await
+    async fn touched_links() -> &'static TokioMutex<HashSet<String>> {
+        TOUCHED_LINKS.get_or_init(|| TokioMutex::new(HashSet::new()))
     }
 
-    /// Uses `ip link show` (iproute2, present on essentially every modern
-    /// distro) to find VPN-prefixed interfaces that are UP.
-    async fn detect_vpn_interface() -> Result<bool, String> {
+    pub async fn tick(is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
+        let vpn_iface = detect_vpn_interface().await?;
+        let vpn_now = vpn_iface.is_some();
+        let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
+
+        if vpn_now && !vpn_was {
+            info!("[NETGUARD] VPN interface detected: {}", vpn_iface.as_deref().unwrap_or("?"));
+        } else if !vpn_now && vpn_was {
+            info!("[NETGUARD] VPN interface no longer detected — reverting DNS overrides");
+            revert().await;
+            return Ok(());
+        }
+
+        if !vpn_now {
+            // No VPN present — leave system DNS exactly as NetworkManager/
+            // systemd-resolved/DHCP set it. This is what fixes the
+            // "keeps reasserting on docker0/br-*/veth* forever" bug: we
+            // simply do nothing at all when there's no VPN to fight.
+            return Ok(());
+        }
+
+        // Only ever touch the VPN's own interface and whichever interface
+        // currently owns the default route — never every link resolvectl
+        // happens to know about (that was the bug: docker0/br-*/veth* were
+        // getting DNS rewritten even though they're irrelevant).
+        let mut targets: HashSet<String> = HashSet::new();
+        if let Some(v) = vpn_iface {
+            targets.insert(v);
+        }
+        if let Some(d) = get_default_route_iface().await {
+            targets.insert(d);
+        }
+
+        if targets.is_empty() {
+            return Err("no target interface found for DNS reassertion".into());
+        }
+
+        reassert_via_resolvectl(&targets).await
+    }
+
+    /// Undoes DNS overrides on every interface we've touched, via
+    /// `resolvectl revert`, which resets a link's DNS config back to
+    /// whatever the network manager/DHCP would normally set.
+    pub async fn revert() {
+        let mut set = touched_links().await.lock().await;
+        for iface in set.drain() {
+            let result = Command::new("resolvectl").args(["revert", &iface]).output().await;
+            match result {
+                Ok(out) if out.status.success() => {
+                    info!("[NETGUARD] {iface}: DNS reverted via resolvectl");
+                }
+                Ok(out) => warn!(
+                    "[NETGUARD] {iface}: resolvectl revert failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(err) => warn!("[NETGUARD] {iface}: failed to run resolvectl revert: {err}"),
+            }
+        }
+    }
+
+    /// Returns the VPN-prefixed interface name if one is UP, via `ip link show`.
+    async fn detect_vpn_interface() -> Result<Option<String>, String> {
         let output = Command::new("ip")
             .args(["link", "show"])
             .output()
@@ -246,121 +368,105 @@ mod platform {
 
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
-            // e.g. "5: wg0: <POINTOPOINT,UP,LOWER_UP> mtu 1420 ..."
             if let Some(rest) = line.split(": ").nth(1) {
                 let name = rest.split(':').next().unwrap_or("").trim();
                 let is_vpn = VPN_IFACE_PREFIXES.iter().any(|p| name.starts_with(p));
                 let is_up = line.contains("UP,") || line.contains(",UP") || line.contains("<UP>");
                 if is_vpn && is_up {
-                    return Ok(true);
+                    return Ok(Some(name.to_string()));
                 }
             }
         }
 
-        Ok(false)
+        Ok(None)
     }
 
-    /// Tries systemd-resolved first (the common case on modern distros); if
-    /// `resolvectl` isn't available or the call fails, falls back to writing
-    /// /etc/resolv.conf directly.
-    async fn reassert_dns() -> Result<(), String> {
-        match reassert_via_resolvectl().await {
-            Ok(()) => Ok(()),
-            Err(resolvectl_err) => {
-                debug!("[NETGUARD] resolvectl path unavailable ({resolvectl_err}), falling back to /etc/resolv.conf");
-                reassert_via_resolv_conf().await
+    /// Finds the interface currently holding the default route, via
+    /// `ip route show default`. This is the interface that would normally
+    /// carry DNS traffic — we want it pinned to 127.0.0.1 while a VPN
+    /// (which may install its own resolver on this same interface, or a
+    /// separate tunnel interface) is active.
+    async fn get_default_route_iface() -> Option<String> {
+        let output = Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        // e.g. "default via 192.168.1.1 dev enp4s0 proto dhcp metric 100"
+        let mut parts = text.split_whitespace();
+        while let Some(tok) = parts.next() {
+            if tok == "dev" {
+                return parts.next().map(str::to_string);
             }
         }
+        None
     }
 
-    async fn reassert_via_resolvectl() -> Result<(), String> {
-        // Confirm resolvectl exists / systemd-resolved is actually in charge
-        // before we start rewriting things through it.
+    /// Sets DNS + default-route domain on exactly the given interfaces,
+    /// skipping any that already report 127.0.0.1 to avoid redundant calls
+    /// and log spam every tick.
+    async fn reassert_via_resolvectl(targets: &HashSet<String>) -> Result<(), String> {
+        // Sanity check resolvectl/systemd-resolved is actually present
+        // before we start issuing per-interface calls.
         let status_output = Command::new("resolvectl")
             .arg("status")
             .output()
             .await
             .map_err(|e| format!("resolvectl not available: {e}"))?;
-
         if !status_output.status.success() {
             return Err("resolvectl status exited non-zero".into());
         }
 
-        // Apply to every interface resolvectl knows about, same "reassert
-        // everywhere" approach as the macOS per-service loop.
-        let text = String::from_utf8_lossy(&status_output.stdout);
-        let mut touched_any = false;
-        for line in text.lines() {
-            // Interface sections look like "Link 3 (wlan0)"
-            if let Some(iface) = line
-                .trim()
-                .strip_prefix("Link ")
-                .and_then(|s| s.split('(').nth(1))
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                touched_any = true;
-                let dns_result = Command::new("resolvectl")
-                    .args(["dns", iface, DNS_TARGET])
-                    .output()
-                    .await
-                    .map_err(|e| format!("resolvectl dns failed for {iface}: {e}"))?;
+        for iface in targets {
+            if is_already_correct(iface).await {
+                debug!("[NETGUARD] {iface}: DNS already {DNS_TARGET}, skipping");
+                touched_links().await.lock().await.insert(iface.clone());
+                continue;
+            }
 
-                if dns_result.status.success() {
-                    debug!("[NETGUARD] {iface}: resolvectl dns -> {DNS_TARGET}");
-                } else {
-                    warn!(
-                        "[NETGUARD] {iface}: resolvectl dns failed: {}",
-                        String::from_utf8_lossy(&dns_result.stderr)
-                    );
-                }
+            let dns_result = Command::new("resolvectl")
+                .args(["dns", iface, DNS_TARGET])
+                .output()
+                .await
+                .map_err(|e| format!("resolvectl dns failed for {iface}: {e}"))?;
 
-                // Make our resolver authoritative for ALL domains on this
-                // link, not just its DHCP-scoped search domain — otherwise
-                // systemd-resolved may still route some queries elsewhere.
-                let domain_result = Command::new("resolvectl")
-                    .args(["domain", iface, "~."])
-                    .output()
-                    .await;
+            if dns_result.status.success() {
+                info!("[NETGUARD] {iface}: DNS reasserted to {DNS_TARGET}");
+                touched_links().await.lock().await.insert(iface.clone());
+            } else {
+                warn!(
+                    "[NETGUARD] {iface}: resolvectl dns failed: {}",
+                    String::from_utf8_lossy(&dns_result.stderr)
+                );
+                continue;
+            }
 
-                if let Ok(out) = domain_result {
-                    if out.status.success() {
-                        debug!("[NETGUARD] {iface}: resolvectl domain -> ~. (default route)");
-                    }
-                }
+            let domain_result = Command::new("resolvectl")
+                .args(["domain", iface, "~."])
+                .output()
+                .await;
+            if let Ok(out) = domain_result && out.status.success() {
+                debug!("[NETGUARD] {iface}: resolvectl domain -> ~. (default route)");
             }
         }
 
-        if touched_any {
-            info!("[NETGUARD] DNS reasserted via resolvectl on all links");
-            Ok(())
-        } else {
-            Err("no links found in resolvectl status output".into())
-        }
+        Ok(())
     }
 
-    /// Last-resort fallback for systems without systemd-resolved: rewrite
-    /// /etc/resolv.conf directly. Only touches the file if it has drifted,
-    /// to avoid unnecessary writes/log noise every tick.
-    async fn reassert_via_resolv_conf() -> Result<(), String> {
-        const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
-        let desired = format!("nameserver {DNS_TARGET}\n");
-
-        let current = fs::read_to_string(RESOLV_CONF_PATH).await.unwrap_or_default();
-        let already_correct = current
-            .lines()
-            .any(|l| l.trim() == format!("nameserver {DNS_TARGET}"));
-
-        if already_correct {
-            debug!("[NETGUARD] /etc/resolv.conf already points at {DNS_TARGET}, skipping");
-            return Ok(());
+    async fn is_already_correct(iface: &str) -> bool {
+        let Ok(out) = Command::new("resolvectl").args(["dns", iface]).output().await else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
         }
-
-        fs::write(RESOLV_CONF_PATH, desired)
-            .await
-            .map_err(|e| format!("failed to write {RESOLV_CONF_PATH}: {e}"))?;
-
-        info!("[NETGUARD] /etc/resolv.conf reasserted to {DNS_TARGET}");
-        Ok(())
+        String::from_utf8_lossy(&out.stdout).contains(DNS_TARGET)
     }
 }
 
@@ -374,4 +480,6 @@ mod platform {
     pub async fn tick(_is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
         Err("netguard is only implemented for macOS and Linux".into())
     }
+
+    pub async fn revert() {}
 }
