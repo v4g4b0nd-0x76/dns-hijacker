@@ -252,25 +252,73 @@ impl DomainTrie {
         self.insert_with_policy(pattern, DomainTriePolicy::Redirect(ips));
     }
 
-    /// Builds a single trie containing both drop and redirect rules -
-    /// matches your apparent intent of one DomainTrieType-driven structure
-    /// rather than two separate generic tries.
     pub fn build(drop_list: &[String], redirect_list: &[(String, String)]) -> Self {
         let mut trie = Self::new();
-        for pattern in drop_list {
+
+        let is_file_reference = |pattern: &str| {
+            pattern.starts_with('/') || pattern.starts_with("./") || pattern.starts_with("../")
+        };
+
+        let read_list_file = |path: &str| -> Vec<String> {
+            match std::fs::read_to_string(path) {
+                Ok(content) => content
+                    .lines()
+                    .filter_map(|raw_line| {
+                        let line = raw_line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            return None;
+                        }
+                        line.split_whitespace().next().map(str::to_string)
+                    })
+                    .collect(),
+                Err(err) => {
+                    tracing::error!("failed to read list file {}: {}", path, err);
+                    Vec::new()
+                }
+            }
+        };
+
+        for entry in drop_list {
+            let pattern = entry.trim();
+            if pattern.is_empty() || pattern.starts_with('#') {
+                continue;
+            }
+            if is_file_reference(pattern) {
+                let lines = read_list_file(pattern);
+                tracing::info!("loaded {} drop entries from {}", lines.len(), pattern);
+                for domain in &lines {
+                    trie.insert_drop(domain);
+                }
+            } else {
+                trie.insert_drop(pattern);
+            }
+        }
+
+        for (pattern, target) in redirect_list {
             let pattern = pattern.trim();
             if pattern.is_empty() || pattern.starts_with('#') {
                 continue;
             }
-            trie.insert_drop(pattern);
-        }
-        for (pattern, ip_with_port) in redirect_list {
-            let pattern = pattern.trim();
-            if pattern.is_empty() || pattern.starts_with('#') {
-                continue;
+            if is_file_reference(pattern) {
+                let lines = read_list_file(pattern);
+                tracing::info!("loaded {} redirect entries from {}", lines.len(), pattern);
+                for line in &lines {
+                    match line.split_once(':') {
+                        Some((from, to)) if !from.trim().is_empty() && !to.trim().is_empty() => {
+                            trie.insert_redirect(from.trim(), to.trim());
+                        }
+                        _ => tracing::warn!(
+                            "skipping malformed redirect line in {}: {:?} (expected domain:ip1,ip2)",
+                            pattern,
+                            line
+                        ),
+                    }
+                }
+            } else {
+                trie.insert_redirect(pattern, target);
             }
-            trie.insert_redirect(pattern, ip_with_port);
         }
+
         trie
     }
 
