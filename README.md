@@ -13,6 +13,8 @@ It binds to UDP port 53 and, for each incoming query:
 3. Checks an in-memory **LRU cache** — if a recent answer for this exact query is cached, it's served immediately (with the transaction ID rewritten to match the new request), avoiding a repeat lookup.
 4. Otherwise, it resolves the domain either through a normal upstream resolver (DoH endpoint or plain UDP resolver) or, if configured, through a **relay** — an encrypted tunnel that performs the actual DNS-over-HTTPS lookup on your behalf, described below.
 
+**Note:** DOQ support is provided and you shall set `init_tls` config to true if you want it but through my tests with free access DOQ resolvers i could not use them so you may not wan to use them at all
+
 The drop/redirect lists exist for basic personal filtering or DNS-based hijacking of specific domains. The relay path exists as a way to get real answers back even when a local network or ISP is tampering with or blocking DNS traffic on the wire, since the query never appears as plaintext DNS at any point.
 
 ## Build
@@ -121,8 +123,10 @@ Both transports use the _same_ `relay_key` semantics: it's always the AES-256-GC
 4. Copy the resulting `.../exec` URL (this includes the deployment ID — there's no separate place to configure that) into `conf.toml` as `relay_url`, alongside the _same_ `relay_key` used by the underlying Worker, with `transport = "google_chained"`.
 5. If you edit the script later, redeploying as a **new version of the existing deployment** (rather than a brand-new deployment) keeps the same `.../exec` URL, so `conf.toml` doesn't need updating each time.
 
-### Metrics 
+### Metrics
+
 You can see the behaviour of resolver using metrics option in configs by enabling it and setting the report type form terminal `LOG` or `/metrics` http endpoint
+
 ```toml
 [metric_conf]
 enable = true
@@ -157,7 +161,7 @@ Two features address this automatically, no configuration required:
   (`utun*`, `wg*`, `tun*`, etc.) and continuously re-points system DNS back
   at this resolver:
   - **macOS**: reasserts DNS on every network service via `networksetup`,
-    *and* directly overwrites the live `State:/Network/Service/<id>/DNS`
+    _and_ directly overwrites the live `State:/Network/Service/<id>/DNS`
     entry via `scutil` for whichever service is currently primary — this is
     the config VPN clients actually hijack, which plain `networksetup`
     calls alone don't reach.
@@ -181,3 +185,9 @@ Google Apps Script has real quotas (roughly 20,000 outbound fetches/day on a fre
 ## CLI
 
 Aside from running the server, there are a couple of standalone commands for setup and troubleshooting — generating a relay key, and resolving a single domain (optionally through a relay) without running the full server. Exact flag names may vary by version; check `--help` on your build for the authoritative list.
+
+### Notes
+
+- I have used claude free plan for many of tests and features and tested manually on both linux and mac my self but there is no guarantee that everything works fine for you as well
+
+- Please tell me if you found any bug or any feature that might make this app helpful

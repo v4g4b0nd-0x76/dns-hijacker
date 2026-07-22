@@ -15,7 +15,7 @@ use dns_hijacker::{
     netguard::run_network_guard,
     new_cache,
     relay::{RelayPicker, resolve_domain_via_relay},
-    resolver::Resolver,
+    resolver::{DoqPool, Resolver},
     run_resolver_finder,
 };
 use std::{
@@ -74,6 +74,12 @@ enum Commands {
 async fn main() -> Result<(), Error> {
     init_logger();
     let cli = Cli::parse();
+    let conf = load_conf(&cli.conf)?;
+    if conf.init_tls {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("failed to install rustls crypto provider");
+    }
 
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => run_server(&cli.conf).await,
@@ -124,6 +130,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&cache),
     ));
     let http = build_http_client()?;
+    let doq_pool = Arc::new(DoqPool::new());
     let (initial_resolvers, resolver_searching, searching_enabled, relay_conf, vpn_reassertion) = {
         let conf_read = conf.read().unwrap();
         (
@@ -148,11 +155,16 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             .await
             .expect("failed to bind receiver socket"),
     );
-    let resolver_picker =
-        ResolverPicker::new(initial_resolvers, http.clone(), &receiver_socket).await?;
+    let resolver_picker = ResolverPicker::new(
+        initial_resolvers,
+        http.clone(),
+        &Arc::clone(&doq_pool),
+        &receiver_socket,
+    )
+    .await?;
     let relay_pciker = if relay_conf.enable {
         Some(Arc::new(
-            RelayPicker::new(&relay_conf, &resolver_picker, &http).await?,
+            RelayPicker::new(&relay_conf, &resolver_picker, &http, &Arc::clone(&doq_pool)).await?,
         ))
     } else {
         None
@@ -188,6 +200,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let metric_wrapper = metric_wrapper.clone();
         let max_age = Duration::from_millis(MAX_BACKLOG_AGE_MS);
         let is_vpn_active = Arc::clone(&is_vpn_active);
+        let doq_pool = doq_pool.clone();
 
         tokio::spawn(async move {
             loop {
@@ -219,6 +232,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 let relay_picker = relay_picker.clone();
                 let metric_wrapper = metric_wrapper.clone();
                 let is_vpn_active = is_vpn_active.clone();
+                let doq_pool = doq_pool.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -233,6 +247,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                         relay_picker: relay_picker.as_deref(),
                         metric_wrapper: metric_wrapper.as_ref(),
                         is_vpn_active: &is_vpn_active,
+                        doq_pool: &doq_pool,
                     };
                     handle_query(&params).await;
                 });
@@ -289,6 +304,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let relay_picker = relay_pciker.clone();
             let metric_wrapper = metric_wrapper.clone();
             let is_vpn_active = is_vpn_active.clone();
+            let doq_pool = doq_pool.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -303,6 +319,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     relay_picker: relay_picker.as_deref(),
                     metric_wrapper: metric_wrapper.as_ref(),
                     is_vpn_active: &is_vpn_active,
+                    doq_pool: &doq_pool,
                 };
                 handle_query(&params).await;
             });
@@ -341,8 +358,10 @@ fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
 async fn list_resolvers(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     let http = build_http_client()?;
+    let doq_pool = Arc::new(DoqPool::new());
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-    let resolver_picker = ResolverPicker::new(conf.resolvers, http.clone(), &socket).await?;
+    let resolver_picker =
+        ResolverPicker::new(conf.resolvers, http.clone(), &doq_pool, &socket).await?;
     let healthy = resolver_picker.healthy_resolvers();
     let top_resolvers: Vec<Resolver> = {
         let guard = healthy.read().unwrap();
@@ -367,10 +386,11 @@ async fn resolve(
 ) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     let http = build_http_client()?;
+    let doq_pool = Arc::new(DoqPool::new());
 
     let receiver_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     let resolver_picker =
-        ResolverPicker::new(conf.resolvers, http.clone(), &receiver_socket).await?;
+        ResolverPicker::new(conf.resolvers, http.clone(), &doq_pool, &receiver_socket).await?;
     if relay {
         if conf.relay_conf.relay_instances.is_empty() {
             return Err(Error::Other(
@@ -378,7 +398,13 @@ async fn resolve(
             ));
         }
 
-        let relay_pciker = RelayPicker::new(&conf.relay_conf, &resolver_picker, &http).await?;
+        let relay_pciker = RelayPicker::new(
+            &conf.relay_conf,
+            &resolver_picker,
+            &http,
+            &Arc::clone(&doq_pool),
+        )
+        .await?;
 
         let relay_client = relay_pciker.pick();
         let relay_resp = resolve_domain_via_relay(
@@ -397,7 +423,9 @@ async fn resolve(
             }
         }
     } else {
-        let resolved = resolver_picker.resolve(domain, resolver, &http).await?;
+        let resolved = resolver_picker
+            .resolve(domain, resolver, &http, &doq_pool)
+            .await?;
         if resolved.is_empty() {
             println!(";; no A records found for {domain}");
         } else {

@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::{
-        Arc, LazyLock, RwLock,
+        Arc, LazyLock, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -25,6 +25,10 @@ use crate::{
     dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
     helpers::get_public_ip,
+};
+use quinn::{
+    ClientConfig, Connecting, Connection, Endpoint, TransportConfig,
+    crypto::rustls::QuicClientConfig,
 };
 use tracing::{debug, error, info, warn};
 
@@ -115,9 +119,10 @@ impl ResolverPicker {
     pub async fn new(
         resolvers: Vec<String>,
         http: reqwest::Client,
+        doq_pool: &Arc<DoqPool>,
         socket: &Arc<UdpSocket>,
     ) -> Result<Self, Error> {
-        let sorted_resolvers = test_resolvers(resolvers, http, socket).await?;
+        let sorted_resolvers = test_resolvers(resolvers, http, doq_pool, socket).await?;
 
         Ok(Self {
             healthy_resolvers: Arc::new(RwLock::new(sorted_resolvers)),
@@ -162,6 +167,7 @@ impl ResolverPicker {
         domain: &str,
         resolver: Option<String>,
         http: &reqwest::Client,
+        doq_pool: &DoqPool,
     ) -> Result<Vec<Ipv4Addr>, Error> {
         let resolver = resolver
             .map(|r| normalize_resolver(&r))
@@ -172,7 +178,8 @@ impl ResolverPicker {
         // close fallback
         let src_addr = SocketAddr::new(public_ip, 0);
         let query = build_lookup_query(domain);
-        let (reply, _len) = resolve_from_upstream(&query, &resolver, src_addr, http).await?;
+        let (reply, _len) =
+            resolve_from_upstream(&query, &resolver, src_addr, http, doq_pool).await?;
         let ips = parse_a_records(&reply);
         Ok(ips)
     }
@@ -193,11 +200,15 @@ pub async fn resolve_from_upstream(
     upstream_resolver: &str,
     src_addr: SocketAddr,
     http: &reqwest::Client,
+    doq_pool: &DoqPool,
 ) -> Result<(Vec<u8>, usize), Error> {
     let final_payload = set_ecs_option(payload, src_addr, None).unwrap_or_else(|| payload.to_vec());
 
     if upstream_resolver.starts_with("https://") {
         return resolve_via_doh(http, upstream_resolver, &final_payload).await;
+    }
+    if upstream_resolver.starts_with("quic://") {
+        return doq_pool.resolve(upstream_resolver, &final_payload).await;
     }
 
     let upstream_addr: SocketAddr = upstream_resolver
@@ -254,15 +265,17 @@ pub async fn resolve_via_doh(
 async fn test_resolvers(
     resolvers: Vec<String>,
     http: reqwest::Client,
+    doq_pool: &Arc<DoqPool>,
     socket: &Arc<UdpSocket>,
 ) -> Result<Vec<Resolver>, Error> {
     let mut results: Vec<(String, Duration)> =
         collect_concurrent(resolvers, HEALTH_CHECK_CONCURRENCY, move |resolver| {
             let http = http.clone();
             let socket = socket.clone();
+            let doq_pool = doq_pool.clone();
             async move {
                 let socket = socket.clone();
-                match measure_latency(&resolver, &http, &socket).await {
+                match measure_latency(&resolver, &http, &doq_pool, &socket).await {
                     Ok(latency) => {
                         debug!("[PICKER LOG] {} responded in {:?}", resolver, latency);
                         Some((resolver, latency))
@@ -296,11 +309,13 @@ async fn test_resolvers(
 async fn measure_latency(
     resolver: &str,
     http: &reqwest::Client,
+    doq_pool: &DoqPool,
     socket: &Arc<UdpSocket>,
 ) -> Result<Duration, Error> {
     let start = Instant::now();
 
     if resolver.starts_with("https://") {
+        tracing::info!("Measuring {}", resolver);
         let req_future = http
             .post(resolver)
             .header("content-type", "application/dns-message")
@@ -320,6 +335,22 @@ async fn measure_latency(
 
         let _ = response.bytes().await.map_err(DohError::Body)?;
         return Ok(start.elapsed());
+    }
+
+    if resolver.starts_with("quic://") {
+        tracing::info!("Measuring {}", resolver);
+        return match timeout(RESOLVE_TIMEOUT, doq_pool.measure_latency(resolver)).await {
+            Ok(Ok(latency)) => Ok(latency),
+            Ok(Err(err)) => {
+                tracing::warn!("{} timed out", resolver);
+                Err(err)
+            }
+            Err(_) => {
+                tracing::warn!("{} timed out", resolver);
+
+                Err(Error::ResolveTimeout)
+            }
+        };
     }
 
     let addr: SocketAddr = resolver
@@ -354,6 +385,7 @@ pub async fn run_resolver_finder(
     let keep_doh = resolver_searching.doh;
     // Client is Arc-backed internally; no extra Arc wrapper needed.
     let http = build_http_client()?;
+    let doq_pool = Arc::new(DoqPool::new());
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
     // RAII guard: flips the flag back to false on ANY exit from the loop body
@@ -423,8 +455,9 @@ pub async fn run_resolver_finder(
             collect_concurrent(candidates, HEALTH_CHECK_CONCURRENCY, |resolver| {
                 let socket = socket.clone();
                 let http = http.clone();
+                let doq_pool = doq_pool.clone();
                 async move {
-                    match measure_latency(&resolver, &http, &socket).await {
+                    match measure_latency(&resolver, &http, &doq_pool, &socket).await {
                         Ok(latency) => {
                             debug!("[PICKER LOG] {} responded in {:?}", resolver, latency);
                             Some((resolver, latency))
@@ -565,6 +598,210 @@ pub fn create_resolver(addr: &str) -> Resolver {
 }
 pub fn resolvers_to_addrs(resolvers: &[Resolver]) -> Vec<&str> {
     resolvers.iter().map(|(addr, _)| addr.as_str()).collect()
+}
+
+const DOQ_ALPN: &[u8] = b"doq";
+const DOQ_DEFAULT_PORT: u16 = 853;
+const DOQ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DOQ_READ_LIMIT: usize = 65_535;
+
+/// Global QUIC client endpoint. One per process: this is what makes 0-RTT
+/// possible, since the session-ticket cache lives inside its ClientConfig.
+static QUIC_ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
+
+fn quic_endpoint() -> Result<&'static Endpoint, Error> {
+    if let Some(ep) = QUIC_ENDPOINT.get() {
+        return Ok(ep);
+    }
+    let endpoint = build_quic_endpoint()?;
+    // Another thread may have raced us; that's fine, OnceLock keeps the first.
+    let _ = QUIC_ENDPOINT.set(endpoint);
+    Ok(QUIC_ENDPOINT.get().expect("just set"))
+}
+
+fn build_quic_endpoint() -> Result<Endpoint, Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let mut crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    crypto.alpn_protocols = vec![DOQ_ALPN.to_vec()];
+    // This is the actual 0-RTT switch: without it rustls will never offer
+    // or accept early data, no matter how the connection is driven.
+    crypto.enable_early_data = true;
+
+    let quic_crypto = QuicClientConfig::try_from(crypto)
+        .map_err(|err| Error::Config(format!("failed to build QUIC TLS config: {err}")))?;
+
+    let mut client_cfg = ClientConfig::new(Arc::new(quic_crypto));
+    let mut transport = TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        DOQ_IDLE_TIMEOUT
+            .try_into()
+            .map_err(|_| Error::Config("invalid QUIC idle timeout".into()))?,
+    ));
+    transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    client_cfg.transport_config(Arc::new(transport));
+
+    let bind_addr: SocketAddr = "0.0.0.0:0"
+        .parse()
+        .map_err(|_| Error::Config("failed to parse QUIC bind addr".into()))?;
+    let mut endpoint = Endpoint::client(bind_addr)
+        .map_err(|err| Error::Config(format!("failed to bind QUIC endpoint: {err}")))?;
+    endpoint.set_default_client_config(client_cfg);
+
+    Ok(endpoint)
+}
+
+/// Pool of live DoQ connections, keyed by the normalized resolver string
+/// (e.g. "quic://dns.example:853"). Shares the single global endpoint, so
+/// every connection in here is eligible for 0-RTT resumption against its
+/// own prior session.
+#[derive(Clone, Default)]
+pub struct DoqPool {
+    connections: Arc<RwLock<HashMap<String, Connection>>>,
+}
+
+impl DoqPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn cached(&self, resolver: &str) -> Option<Connection> {
+        let guard = self.connections.read().ok()?;
+        let conn = guard.get(resolver)?;
+        // close_reason() is Some once the connection has terminated; a stale
+        // entry is worse than no entry, so don't hand it back.
+        if conn.close_reason().is_none() {
+            Some(conn.clone())
+        } else {
+            None
+        }
+    }
+
+    fn store(&self, resolver: &str, conn: Connection) {
+        if let Ok(mut guard) = self.connections.write() {
+            guard.insert(resolver.to_string(), conn);
+        }
+    }
+
+    /// Get a usable connection to `resolver`, reusing a cached one if it's
+    /// still alive, otherwise connecting (attempting 0-RTT first).
+    async fn connection_for(&self, resolver: &str) -> Result<Connection, Error> {
+        if let Some(conn) = self.cached(resolver) {
+            return Ok(conn);
+        }
+
+        let (host, addr) = parse_doq_target(resolver)?;
+        let endpoint = quic_endpoint()?;
+
+        let connecting: Connecting = endpoint.connect(addr, &host).map_err(|err| {
+            Error::Config(format!("QUIC connect setup failed for {resolver}: {err}"))
+        })?;
+
+        let connection = match connecting.into_0rtt() {
+            Ok((connection, accepted)) => {
+                debug!("[DOQ] attempting 0-RTT to {resolver}");
+                // The handshake keeps running in the background; confirm
+                // whether the server actually accepted early data purely
+                // for observability — we don't block the query on it.
+                tokio::spawn(async move {
+                    if !accepted.await {
+                        debug!("[DOQ] server rejected 0-RTT, handshake completed normally");
+                    }
+                });
+                connection
+            }
+            Err(connecting) => {
+                debug!("[DOQ] no valid session ticket for {resolver}, doing full handshake");
+                connecting.await.map_err(|err| {
+                    Error::Config(format!("QUIC handshake failed for {resolver}: {err}"))
+                })?
+            }
+        };
+
+        self.store(resolver, connection.clone());
+        Ok(connection)
+    }
+
+    /// Send a raw DNS wire-format query and return the raw response.
+    pub async fn resolve(&self, resolver: &str, payload: &[u8]) -> Result<(Vec<u8>, usize), Error> {
+        let connection = self.connection_for(resolver).await?;
+        send_query(&connection, payload).await
+    }
+
+    /// Health-check probe, mirroring `measure_latency` for UDP/DoH.
+    pub async fn measure_latency(&self, resolver: &str) -> Result<Duration, Error> {
+        let start = tokio::time::Instant::now();
+        let connection = self.connection_for(resolver).await?;
+        let _ = send_query(&connection, DNS_PROBE_PACKET).await?;
+        Ok(start.elapsed())
+    }
+    #[cfg(test)]
+    pub fn evict(&self, resolver: &str) {
+        if let Ok(mut guard) = self.connections.write() {
+            if let Some(conn) = guard.remove(resolver) {
+                conn.close(0u32.into(), b"evicted for test");
+            }
+        }
+    }
+}
+
+async fn send_query(connection: &Connection, payload: &[u8]) -> Result<(Vec<u8>, usize), Error> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|err| Error::Config(format!("failed to open QUIC stream: {err}")))?;
+
+    // RFC 9250 §4.2.1: the DNS message ID MUST be 0 on the wire for DoQ.
+    let mut query = payload.to_vec();
+    if query.len() >= 2 {
+        query[0] = 0;
+        query[1] = 0;
+    }
+
+    send.write_all(&query)
+        .await
+        .map_err(|err| Error::Config(format!("failed to write DoQ query: {err}")))?;
+    // finish() signals FIN on this stream; the peer treats that as
+    // "message complete" since DoQ has no length-prefix framing.
+    send.finish()
+        .map_err(|err| Error::Config(format!("failed to finish DoQ stream: {err}")))?;
+
+    let response = recv
+        .read_to_end(DOQ_READ_LIMIT)
+        .await
+        .map_err(|err| Error::Config(format!("failed to read DoQ response: {err}")))?;
+    let len = response.len();
+    Ok((response, len))
+}
+
+/// Parse a `quic://host[:port]` resolver string into a server name (for SNI /
+/// certificate verification) and a resolved `SocketAddr`.
+fn parse_doq_target(resolver: &str) -> Result<(String, SocketAddr), Error> {
+    let rest = resolver
+        .strip_prefix("quic://")
+        .ok_or_else(|| Error::InvalidResolver(resolver.to_owned()))?;
+
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(DOQ_DEFAULT_PORT)),
+        None => (rest, DOQ_DEFAULT_PORT),
+    };
+
+    // Support both literal IPs and hostnames; hostnames need a resolve step.
+    let addr = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        SocketAddr::new(ip, port)
+    } else {
+        use std::net::ToSocketAddrs;
+        format!("{host}:{port}")
+            .to_socket_addrs()
+            .map_err(|err| Error::Config(format!("failed to resolve DoQ host {host}: {err}")))?
+            .next()
+            .ok_or_else(|| Error::InvalidResolver(resolver.to_owned()))?
+    };
+
+    Ok((host.to_string(), addr))
 }
 
 #[cfg(test)]
@@ -883,5 +1120,53 @@ garbage
 
         // no explicit resolver given -> falls back to the picker's first (best) entry
         assert_eq!(picker.select_resolver(None), "1.1.1.1:53");
+    }
+    #[test]
+    fn parses_ip_with_explicit_port() {
+        let (host, addr) = parse_doq_target("quic://9.9.9.9:8853").unwrap();
+        assert_eq!(host, "9.9.9.9");
+        assert_eq!(addr.port(), 8853);
+    }
+
+    #[test]
+    fn parses_ip_with_default_port() {
+        let (_, addr) = parse_doq_target("quic://9.9.9.9").unwrap();
+        assert_eq!(addr.port(), DOQ_DEFAULT_PORT);
+    }
+
+    #[test]
+    fn rejects_non_quic_scheme() {
+        assert!(parse_doq_target("https://dns.example/dns-query").is_err());
+        assert!(parse_doq_target("1.1.1.1:53").is_err());
+    }
+    #[tokio::test]
+    #[ignore = "hits a real network resolver"]
+    async fn doq_measure_latency_cold_warm_and_0rtt() {
+        let pool = DoqPool::new();
+        let resolver = "quic://unfiltered.adguard-dns.com:853";
+
+        let cold = pool
+            .measure_latency(resolver)
+            .await
+            .expect("cold probe failed");
+        println!("cold (full handshake):  {cold:?}");
+
+        let warm = pool
+            .measure_latency(resolver)
+            .await
+            .expect("warm probe failed");
+        println!("warm (cached conn):     {warm:?}");
+        assert!(warm < cold, "warm reuse should beat a fresh handshake");
+
+        pool.evict(resolver);
+        let zero_rtt = pool
+            .measure_latency(resolver)
+            .await
+            .expect("0-RTT probe failed");
+        println!("reconnect (0-RTT):      {zero_rtt:?}");
+        assert!(
+            zero_rtt < cold,
+            "0-RTT reconnect ({zero_rtt:?}) should beat a cold handshake ({cold:?})"
+        );
     }
 }

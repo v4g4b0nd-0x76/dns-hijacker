@@ -17,7 +17,7 @@ use crate::{
     errors::Error,
     metric_wrapper::MetricWrapper,
     relay::RelayPicker,
-    resolver::{ResolverPicker, resolve_from_upstream},
+    resolver::{DoqPool, ResolverPicker, resolve_from_upstream},
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{net::UdpSocket, time::timeout};
@@ -93,6 +93,7 @@ pub struct HandleQueryParams<'a> {
     pub relay_picker: Option<&'a RelayPicker>,
     pub metric_wrapper: Option<&'a Arc<MetricWrapper>>,
     pub is_vpn_active: &'a Arc<AtomicBool>,
+    pub doq_pool: &'a DoqPool,
 }
 macro_rules! incr_metric {
     ($metric:expr, $field:ident) => {
@@ -114,6 +115,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         relay_picker,
         metric_wrapper,
         is_vpn_active,
+        doq_pool,
     } = *params;
 
     if payload.len() < 12 {
@@ -172,7 +174,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
 
         timeout(
             RESOLVE_TIMEOUT,
-            resolve_from_upstream(payload, &resolver, src_addr, http),
+            resolve_from_upstream(payload, &resolver, src_addr, http, doq_pool),
         )
         .await
         .unwrap_or(Err(Error::ResolveTimeout))

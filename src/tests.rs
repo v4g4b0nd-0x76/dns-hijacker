@@ -22,7 +22,7 @@ use crate::{
     handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, handle_query},
     metric_wrapper::MetricWrapper,
     relay::{RelayInstance, RelayPicker},
-    resolver::{ResolverPicker, create_resolver},
+    resolver::{DoqPool, ResolverPicker, create_resolver},
 };
 
 fn empty_cache() -> ResponseCache {
@@ -60,6 +60,7 @@ async fn call_handle_query(
     resolver_picker: &ResolverPicker,
     server_socket: &UdpSocket,
     http: &reqwest::Client,
+    doq_pool: &DoqPool,
     cache: &ResponseCache,
 ) {
     let metric_wrapper = Some(&(Arc::new(MetricWrapper::new())));
@@ -75,6 +76,7 @@ async fn call_handle_query(
         relay_picker: None,
         metric_wrapper,
         is_vpn_active: &is_vpn_active,
+        doq_pool,
     };
     handle_query(&params).await;
 }
@@ -270,6 +272,7 @@ async fn integration_redirect_and_drop_over_udp() {
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
+    let doq_pool = Arc::new(DoqPool::new());
 
     let redirect_query = mock_query_foo_test_com();
     client.send_to(&redirect_query, server_addr).await.unwrap();
@@ -282,6 +285,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -301,6 +305,7 @@ async fn integration_redirect_and_drop_over_udp() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -346,6 +351,8 @@ async fn integration_udp_upstream_echo() {
 
     let mut buf = [0u8; 512];
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
+    let doq_pool = Arc::new(DoqPool::new());
+
     call_handle_query(
         &buf[..len],
         src,
@@ -353,6 +360,7 @@ async fn integration_udp_upstream_echo() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -410,6 +418,8 @@ async fn integration_cache_hit_skips_upstream() {
     q1[1] = 0x01;
     client.send_to(&q1, server_addr).await.unwrap();
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
+    let doq_pool = Arc::new(DoqPool::new());
+
     call_handle_query(
         &buf[..len],
         src,
@@ -417,6 +427,7 @@ async fn integration_cache_hit_skips_upstream() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -436,6 +447,7 @@ async fn integration_cache_hit_skips_upstream() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -477,6 +489,7 @@ async fn integration_resolve_timeout_returns_servfail() {
     let (len, src) = server.recv_from(&mut buf).await.unwrap();
 
     let started = Instant::now();
+    let doq_pool = Arc::new(DoqPool::new());
     call_handle_query(
         &buf[..len],
         src,
@@ -484,6 +497,7 @@ async fn integration_resolve_timeout_returns_servfail() {
         &picker,
         &server,
         &http,
+        &Arc::clone(&doq_pool),
         &cache,
     )
     .await;
@@ -566,7 +580,8 @@ async fn relay_picker_new_rejects_empty_instances() {
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
+    let doq_pool = Arc::new(DoqPool::new());
 
-    let result = RelayPicker::new(&conf, &picker, &http).await;
+    let result = RelayPicker::new(&conf, &picker, &http, &doq_pool).await;
     assert!(result.is_err());
 }
