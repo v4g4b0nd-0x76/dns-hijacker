@@ -42,6 +42,8 @@ There are systemd (Linux) and launchd (macOS) setup notes in `assets/SERVICES.md
 The base config controls the drop list, redirect list, and which upstream resolvers to use:
 
 ```toml
+record_history = true # if set to true the resolved records for each domain would be recorded in history.txt file this is usefull if you ISP would remove A records intentionally and you want to have a list of them recorded
+
 # domains you want to block (resolve to nothing / NXDOMAIN)
 drop_list = [
     "google.com",

@@ -26,6 +26,8 @@ pub struct Conf {
     pub vpn_reassertion: bool,
     #[serde(default = "default_false")]
     pub init_tls: bool,
+    #[serde(default = "default_false")]
+    pub record_history: bool,
 }
 
 #[derive(Clone, Default, Deserialize)]

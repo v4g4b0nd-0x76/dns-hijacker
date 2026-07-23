@@ -4,7 +4,10 @@ version = "1.5.7"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+serde = { version = "1.0.228", default-features = false, features = [
+    "derive",
+    "std",
+] }
 tokio = { version = "1.52.3", default-features = false, features = [
     "rt",
     "process",
@@ -15,8 +18,14 @@ tokio = { version = "1.52.3", default-features = false, features = [
     "sync",
     "time",
 ] }
-toml = { version = "1.1.2", default-features = false, features = ["parse", "serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+toml = { version = "1.1.2", default-features = false, features = [
+    "parse",
+    "serde",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
 lru = "0.12"
 socket2 = "0.5"
 tracing = "0.1.44"
@@ -35,8 +44,16 @@ hmac = "0.12"
 sha2 = "0.10"
 serde_json = "1.0.150"
 quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
 webpki-roots = "0.26"
+crossbeam-queue = "0.3.13"
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
 [profile.release]
 # Size-first release build; LTO still inlines across crates for hot paths.
 opt-level = "z"

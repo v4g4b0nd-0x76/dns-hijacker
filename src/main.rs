@@ -8,7 +8,7 @@ use dns_hijacker::{
         RESOLVE_SEMAPHORE,
     },
     gen_relay_key, handle_query,
-    handler::{DomainTrie, HandleQueryParams},
+    handler::{DomainTrie, HandleQueryParams, HistoryBuffer},
     helpers::clear_screen,
     init_logger, load_conf,
     metric_wrapper::MetricWrapper,
@@ -131,7 +131,14 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     ));
     let http = build_http_client()?;
     let doq_pool = Arc::new(DoqPool::new());
-    let (initial_resolvers, resolver_searching, searching_enabled, relay_conf, vpn_reassertion) = {
+    let (
+        initial_resolvers,
+        resolver_searching,
+        searching_enabled,
+        relay_conf,
+        vpn_reassertion,
+        record_history,
+    ) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.resolvers.clone(),
@@ -140,7 +147,13 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 && !conf_read.resolver_searching.resolver_source.is_empty(),
             conf_read.relay_conf.clone(),
             conf_read.vpn_reassertion,
+            conf_read.record_history,
         )
+    };
+    let history_buffer = if record_history {
+        Some(Arc::new(HistoryBuffer::new("history.txt")))
+    } else {
+        None
     };
 
     let is_vpn_active = if vpn_reassertion {
@@ -201,6 +214,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let max_age = Duration::from_millis(MAX_BACKLOG_AGE_MS);
         let is_vpn_active = Arc::clone(&is_vpn_active);
         let doq_pool = doq_pool.clone();
+        let history_buffer = history_buffer.clone();
 
         tokio::spawn(async move {
             loop {
@@ -233,6 +247,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 let metric_wrapper = metric_wrapper.clone();
                 let is_vpn_active = is_vpn_active.clone();
                 let doq_pool = doq_pool.clone();
+                let history_buffer = history_buffer.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -248,6 +263,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                         metric_wrapper: metric_wrapper.as_ref(),
                         is_vpn_active: &is_vpn_active,
                         doq_pool: &doq_pool,
+                        history_buffer: history_buffer.as_ref(),
                     };
                     handle_query(&params).await;
                 });
@@ -305,7 +321,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             let metric_wrapper = metric_wrapper.clone();
             let is_vpn_active = is_vpn_active.clone();
             let doq_pool = doq_pool.clone();
-
+            let history_buffer = history_buffer.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let params = HandleQueryParams {
@@ -320,6 +336,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     metric_wrapper: metric_wrapper.as_ref(),
                     is_vpn_active: &is_vpn_active,
                     doq_pool: &doq_pool,
+                    history_buffer: history_buffer.as_ref(),
                 };
                 handle_query(&params).await;
             });

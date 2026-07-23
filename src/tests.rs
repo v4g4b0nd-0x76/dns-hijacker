@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     sync::{Arc, Mutex, atomic::AtomicBool},
@@ -7,6 +8,7 @@ use std::{
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::OsRng};
 use lru::LruCache;
+use tempfile::NamedTempFile;
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
@@ -19,7 +21,7 @@ use crate::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl,
         parse_domain, set_ecs_option, with_txid,
     },
-    handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, handle_query},
+    handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, HistoryBuffer, handle_query},
     metric_wrapper::MetricWrapper,
     relay::{RelayInstance, RelayPicker},
     resolver::{DoqPool, ResolverPicker, create_resolver},
@@ -77,6 +79,7 @@ async fn call_handle_query(
         metric_wrapper,
         is_vpn_active: &is_vpn_active,
         doq_pool,
+        history_buffer: None,
     };
     handle_query(&params).await;
 }
@@ -584,4 +587,211 @@ async fn relay_picker_new_rejects_empty_instances() {
 
     let result = RelayPicker::new(&conf, &picker, &http, &doq_pool).await;
     assert!(result.is_err());
+}
+
+async fn read_history(path: &std::path::Path) -> HashMap<String, Vec<String>> {
+    let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        if let Some(domain) = parts.next() {
+            map.insert(domain.to_string(), parts.map(String::from).collect());
+        }
+    }
+    map
+}
+
+#[tokio::test]
+async fn flush_writes_new_domain() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(data.get("x.com").unwrap(), &vec!["1.1.1.1".to_string()]);
+}
+
+#[tokio::test]
+async fn appends_new_ip_after_existing_ones() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.close().await.unwrap();
+
+    // second session against the same file
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+    history.push("x.com".into(), "8.9.9.9".into());
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(
+        data.get("x.com").unwrap(),
+        &vec!["1.1.1.1".to_string(), "8.9.9.9".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn skips_exact_duplicate_of_last_ip() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.push("x.com".into(), "8.9.9.9".into());
+    history.push("x.com".into(), "8.9.9.9".into()); // duplicate, should be skipped
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(
+        data.get("x.com").unwrap(),
+        &vec!["1.1.1.1".to_string(), "8.9.9.9".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn readds_ip_if_not_immediately_previous() {
+    // Confirms current semantics: dedup only checks the LAST entry,
+    // so 1.1.1.1 -> 8.9.9.9 -> 1.1.1.1 keeps all three.
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.push("x.com".into(), "8.9.9.9".into());
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(
+        data.get("x.com").unwrap(),
+        &vec![
+            "1.1.1.1".to_string(),
+            "8.9.9.9".to_string(),
+            "1.1.1.1".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn multiple_domains_are_independent() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.push("y.com".into(), "2.2.2.2".into());
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(data.get("x.com").unwrap(), &vec!["1.1.1.1".to_string()]);
+    assert_eq!(data.get("y.com").unwrap(), &vec!["2.2.2.2".to_string()]);
+}
+
+#[tokio::test]
+async fn auto_flushes_once_capacity_is_reached() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    // push exactly CAPACITY unique entries to trigger the internal flush
+    for i in 0..100 {
+        history.push(format!("domain{i}.com"), "1.1.1.1".into());
+    }
+
+    // give the spawned flush task a chance to run without needing close()
+    for _ in 0..50 {
+        if !tokio::fs::read_to_string(file.path())
+            .await
+            .unwrap_or_default()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let data = read_history(file.path()).await;
+    assert!(
+        !data.is_empty(),
+        "expected auto-flush to have written entries"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_pushes_from_multiple_tasks_are_not_lost() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let h = Arc::clone(&history);
+        handles.push(tokio::spawn(async move {
+            h.push(format!("domain{i}.com"), "1.1.1.1".into());
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    let domains: HashSet<_> = data.keys().cloned().collect();
+    for i in 0..20 {
+        assert!(
+            domains.contains(&format!("domain{i}.com")),
+            "missing domain{i}.com after concurrent push"
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_pushes_to_same_domain_preserve_all_distinct_ips() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let h = Arc::clone(&history);
+        handles.push(tokio::spawn(async move {
+            h.push("shared.com".into(), format!("10.0.0.{i}"));
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    let ips = data.get("shared.com").unwrap();
+    let unique: HashSet<_> = ips.iter().collect();
+    // all 10 should be present since each ip differs from the last-seen one
+    // at the time it landed in a batch (exact order isn't guaranteed
+    // across concurrent producers, only per-domain content).
+    assert_eq!(
+        unique.len(),
+        10,
+        "expected all distinct ips to survive: {ips:?}"
+    );
+}
+
+#[tokio::test]
+async fn close_flushes_remaining_buffered_entries() {
+    let file = NamedTempFile::new().unwrap();
+    let history = Arc::new(HistoryBuffer::new(file.path()));
+
+    // push fewer than CAPACITY so no auto-flush fires
+    history.push("x.com".into(), "1.1.1.1".into());
+    history.push("y.com".into(), "2.2.2.2".into());
+
+    // nothing written yet
+    assert!(
+        tokio::fs::read_to_string(file.path())
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+
+    history.close().await.unwrap();
+
+    let data = read_history(file.path()).await;
+    assert_eq!(data.len(), 2);
 }

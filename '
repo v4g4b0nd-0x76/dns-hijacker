@@ -1,13 +1,9 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::PathBuf,
     sync::{
         Arc,
-        atomic::{
-            AtomicBool,
-            Ordering::{AcqRel, Acquire, Relaxed, Release},
-        },
+        atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
     },
 };
 
@@ -15,17 +11,16 @@ use crate::{
     cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
     constants::{RESOLVE_TIMEOUT, SOCKET_RCVBUF_BYTES},
     dns::{
-        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, parse_a_records,
-        parse_domain, with_txid,
+        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, parse_domain,
+        with_txid,
     },
     errors::Error,
     metric_wrapper::MetricWrapper,
     relay::RelayPicker,
     resolver::{DoqPool, ResolverPicker, resolve_from_upstream},
 };
-use crossbeam_queue::ArrayQueue;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::{io::AsyncWriteExt, net::UdpSocket, time::timeout};
+use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, error, warn};
 
 pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
@@ -99,7 +94,6 @@ pub struct HandleQueryParams<'a> {
     pub metric_wrapper: Option<&'a Arc<MetricWrapper>>,
     pub is_vpn_active: &'a Arc<AtomicBool>,
     pub doq_pool: &'a DoqPool,
-    pub history_buffer: Option<&'a Arc<HistoryBuffer>>,
 }
 macro_rules! incr_metric {
     ($metric:expr, $field:ident) => {
@@ -122,7 +116,6 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         metric_wrapper,
         is_vpn_active,
         doq_pool,
-        history_buffer,
     } = *params;
 
     if payload.len() < 12 {
@@ -192,11 +185,6 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         Ok(reply_buf) => {
             cache_store(cache, cache_key, &reply_buf);
             incr_metric!(metric_wrapper, resolved_count);
-            if let Some(history_buffer) = history_buffer {
-                let a_records = parse_a_records(&reply_buf);
-                let ips: Vec<String> = a_records.iter().map(|ip| ip.to_string()).collect();
-                history_buffer.push_many(domain, ips);
-            }
             send(server_socket, src_addr, with_txid(reply_buf, req_txid)).await;
         }
         Err(Error::ResolveTimeout) => {
@@ -354,110 +342,22 @@ impl DomainTrie {
         &DomainTriePolicy::None
     }
 }
-pub type HistoryBufferEntry = (String, Vec<String>); // domain to ipv4
-const CAP: usize = 100;
-pub struct HistoryBuffer {
-    path: PathBuf,
-    queue: ArrayQueue<HistoryBufferEntry>,
-    flushing: AtomicBool,
+pub type HistoryBufferEntry = (String, String); // domain to ipv4
+pub struct HistoryBuffer<'a> {
+    fd: &'a tokio::fs::File,
+    buff: [HistoryBufferEntry; 100], // 500 is the flush siz
+    write_cursor: AtomicU32,
+    read_cursor: AtomicU32,
 }
 impl HistoryBuffer {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            queue: ArrayQueue::new(CAP),
-            flushing: AtomicBool::new(false),
-        }
-    }
-
-    pub fn push(self: &Arc<Self>, domain: String, ip: String) {
-        self.push_many(domain, vec![ip]);
-    }
-
-    pub fn push_many(self: &Arc<Self>, domain: String, ips: Vec<String>) {
-        if ips.is_empty() {
-            return;
-        }
-        let mut entry = (domain, ips);
-        while let Err(rejected) = self.queue.push(entry) {
-            entry = rejected;
-            self.try_spawn_flush();
-            std::hint::spin_loop();
-        }
-        if self.queue.len() >= CAP {
-            self.try_spawn_flush();
-        }
-    }
-    fn try_spawn_flush(self: &Arc<Self>) {
-        if self
-            .flushing
-            .compare_exchange(false, true, AcqRel, Acquire)
-            .is_ok()
-        {
-            let this = Arc::clone(self);
-            tokio::spawn(async move {
-                if let Err(e) = this.flush().await {
-                    tracing::error!("history flush failed: {e:?}");
-                }
-                this.flushing.store(false, Release);
-            });
-        }
-    }
-
-    async fn flush(&self) -> Result<(), Error> {
-        let mut batch = Vec::with_capacity(CAP);
-        while let Some(entry) = self.queue.pop() {
-            batch.push(entry);
-        }
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        let mut history: HashMap<String, Vec<String>> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
-        if let Ok(content) = tokio::fs::read_to_string(&self.path).await {
-            for line in content.lines() {
-                let mut parts = line.split_whitespace();
-                if let Some(domain) = parts.next() {
-                    order.push(domain.to_string());
-                    history.insert(domain.to_string(), parts.map(String::from).collect());
-                }
-            }
-        }
-
-        for (domain, ips) in batch {
-            let existing = history.entry(domain.clone()).or_insert_with(|| {
-                order.push(domain.clone());
-                Vec::new()
-            });
-            for ip in ips {
-                // skip if it's an exact repeat of the last recorded ip
-                if existing.last().map_or(true, |last| last != &ip) {
-                    existing.push(ip);
-                }
-            }
-        }
-
-        let mut out = String::new();
-        for domain in &order {
-            out.push_str(domain);
-            for ip in &history[domain] {
-                out.push(' ');
-                out.push_str(ip);
-            }
-            out.push('\n');
-        }
-
-        let mut file = tokio::fs::File::create(&self.path).await?;
-        file.write_all(out.as_bytes()).await?;
-        file.flush().await?;
-        Ok(())
-    }
-    pub async fn close(self: &Arc<Self>) -> Result<(), Error> {
-        while self.flushing.load(Acquire) {
-            tokio::task::yield_now().await;
-        }
-        self.flush().await
+    async fn new() -> Result<Self, Error> {
+        let fd = tokio::fs::File::open("history.txt").await?;
+        Ok(Self {
+            fd: &fd,
+            buff: Vec::new::<&str>(),
+            write_cursor: AtomicU32::new(0),
+            read_cursor: AtomicU32::new(0),
+        })
     }
 }
 
