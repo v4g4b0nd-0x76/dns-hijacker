@@ -1,24 +1,23 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, build_http_client,
+    Error, ResolverPicker,
     conf::watch_conf_and_reload,
     constants::{BACKLOG_CAPACITY, LOCAL_DNS},
     gen_relay_key, handle_query,
     handler::{HandleQueryParams, HistoryBuffer},
     helpers::clear_screen,
-    init_logger, load_conf,
-    metric_wrapper::MetricWrapper,
-    netguard::run_network_guard,
-    new_cache,
+    init_logger, load_conf, new_cache,
     relay::{RelayPicker, resolve_domain_via_relay},
     resolver::{DoqPool, Resolver},
     run_resolver_finder,
 };
 use shared::{
-    bind_udp_socket,
+    bind_udp_socket, build_http_client,
     constants::{MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
     domain_trie::DomainTrie,
+    metric_wrapper::MetricWrapper,
+    netguard::run_network_guard,
 };
 use std::{
     io,

@@ -1,5 +1,6 @@
 use rand::RngExt;
 use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 
 #[inline(always)]
 pub fn parse_domain(payload: &[u8], mut offset: usize) -> Option<(String, usize)> {
@@ -109,7 +110,6 @@ pub fn craft_servfail_response(payload: &[u8]) -> Option<Vec<u8>> {
     resp[3] = 0x82;
     Some(resp)
 }
-
 
 #[inline(always)]
 pub fn matches_domain_pattern(domain: &str, pattern: &str) -> bool {
@@ -360,7 +360,6 @@ fn skip_rr(buf: &[u8], offset: usize) -> Option<usize> {
     Some(end)
 }
 
-
 /// One EDNS0 option (RFC 6891 section 6.1.2): OPTION-CODE, OPTION-LENGTH, OPTION-DATA.
 struct EdnsOption<'a> {
     code: u16,
@@ -458,7 +457,6 @@ pub fn set_ecs_option(
     }
 }
 
-
 #[inline(always)]
 fn rebuild_with_new_opt(payload: &[u8], existing: &EdnsOpt, new_options: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(payload.len() + new_options.len() + 16);
@@ -488,4 +486,14 @@ fn rebuild_with_new_opt(payload: &[u8], existing: &EdnsOpt, new_options: &[u8]) 
     }
 
     Some(out)
+}
+
+pub async fn send(server_socket: &UdpSocket, src_addr: SocketAddr, resp: Vec<u8>) {
+    let _ = server_socket.send_to(&resp, src_addr).await;
+}
+
+pub async fn send_servfail(server_socket: &UdpSocket, src_addr: SocketAddr, payload: &[u8]) {
+    if let Some(resp) = craft_servfail_response(payload) {
+        send(server_socket, src_addr, resp).await;
+    }
 }

@@ -2,7 +2,6 @@
 use shared::*;
 pub mod conf;
 pub mod handler;
-pub mod netguard;
 pub mod relay;
 pub mod resolver;
 pub use cache::{ResponseCache, new_cache};
@@ -11,14 +10,12 @@ pub use errors::{DohError, Error};
 pub use handler::handle_query;
 pub use logger::init_logger;
 pub use relay::gen_relay_key;
-pub use resolver::{ResolverPicker, build_http_client, run_resolver_finder};
+pub use resolver::{ResolverPicker, run_resolver_finder};
 
 pub mod constants {
     use std::time::Duration;
 
     pub const LOCAL_DNS: &str = "127.0.0.1:53";
-    pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
-    pub const DOH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     pub const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
     pub const SOCKET_BUF_SIZE: usize = 4 * 1024 * 1024;
     pub const SEARCH_RESOLVER_INTERVAL: u64 = 15;
@@ -27,9 +24,6 @@ pub mod constants {
 
     pub const NETGUARD_POLL_INTERVAL_MS: u64 = 1500;
     pub const DNS_TARGET: &str = "127.0.0.1";
-    /// Interface name prefixes used by macOS VPN clients (WireGuard/OpenVPN utun,
-    /// IPSec, PPP-based). Covers Windscribe, NordVPN, Mullvad, ProtonVPN, etc.
-    pub const VPN_IFACE_PREFIXES: &[&str] = &["utun", "ipsec", "ppp", "tun", "tap"];
 }
 pub mod helpers {
     use crate::Error;

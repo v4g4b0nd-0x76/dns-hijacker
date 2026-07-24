@@ -7,6 +7,7 @@ use std::{
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::OsRng};
 use shared::{
+    constants::RESOLVE_TIMEOUT,
     domain_trie::{DomainTrie, DomainTriePolicy},
     empty_cache, mock_query_google,
 };
@@ -16,7 +17,6 @@ use tokio::{net::UdpSocket, time::timeout};
 use crate::{
     cache::ResponseCache,
     conf::Conf,
-    constants::RESOLVE_TIMEOUT,
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl,
         parse_domain, set_ecs_option, with_txid,
@@ -628,11 +628,7 @@ async fn readds_ip_if_not_immediately_previous() {
     let data = read_history(file.path()).await;
     assert_eq!(
         data.get("x.com").unwrap(),
-        &vec![
-            "1.1.1.1".to_string(),
-            "8.9.9.9".to_string(),
-            "1.1.1.1".to_string()
-        ]
+        &vec!["1.1.1.1".to_string(), "8.9.9.9".to_string(),]
     );
 }
 

@@ -5,6 +5,7 @@ pub mod domain_trie;
 pub mod errors;
 pub mod logger;
 pub mod metric_wrapper;
+pub mod netguard;
 #[cfg(test)]
 mod tests;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -12,7 +13,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 pub use crate::errors::*;
 use crate::{
     cache::ResponseCache,
-    constants::{DNS_PROBE_PACKET, SOCKET_RCVBUF_BYTES},
+    constants::{DNS_PROBE_PACKET, DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SOCKET_RCVBUF_BYTES},
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -91,4 +92,13 @@ pub fn bind_udp_socket(addr: &str) -> Result<UdpSocket, Error> {
 
     tokio::net::UdpSocket::from_std(std_socket)
         .map_err(|e| Error::Other(format!("failed to convert to tokio socket: {e}")))
+}
+
+pub fn build_http_client() -> Result<reqwest::Client, Error> {
+    reqwest::Client::builder()
+        .timeout(RESOLVE_TIMEOUT)
+        .connect_timeout(DOH_CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| Error::Config(format!("failed to build HTTP client: {err}")))
 }

@@ -6,13 +6,13 @@
 //! away or the process shuts down.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering::Relaxed},
     Arc,
+    atomic::{AtomicBool, Ordering::Relaxed},
 };
 
 use tokio::{
     process::Command,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::{info, warn};
 
@@ -41,11 +41,7 @@ pub async fn revert() {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use std::{
-        collections::HashSet,
-        process::Stdio,
-        sync::OnceLock,
-    };
+    use std::{collections::HashSet, process::Stdio, sync::OnceLock};
     use tokio::{io::AsyncWriteExt, sync::Mutex as TokioMutex};
     use tracing::debug;
 
@@ -204,7 +200,12 @@ mod platform {
 
         if already_correct {
             debug!("[NETGUARD] {service}: DNS already {DNS_TARGET}, skipping");
-            touched().await.lock().await.services.insert(service.to_string());
+            touched()
+                .await
+                .lock()
+                .await
+                .services
+                .insert(service.to_string());
             return;
         }
 
@@ -217,7 +218,12 @@ mod platform {
         match result {
             Ok(out) if out.status.success() => {
                 info!("[NETGUARD] {service}: DNS reasserted to {DNS_TARGET}");
-                touched().await.lock().await.services.insert(service.to_string());
+                touched()
+                    .await
+                    .lock()
+                    .await
+                    .services
+                    .insert(service.to_string());
             }
             Ok(out) => {
                 warn!(
@@ -293,7 +299,10 @@ mod platform {
         let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
 
         if vpn_now && !vpn_was {
-            info!("[NETGUARD] VPN interface detected: {}", vpn_iface.as_deref().unwrap_or("?"));
+            info!(
+                "[NETGUARD] VPN interface detected: {}",
+                vpn_iface.as_deref().unwrap_or("?")
+            );
         } else if !vpn_now && vpn_was {
             info!("[NETGUARD] VPN interface no longer detected — reverting DNS overrides");
             revert().await;
@@ -333,7 +342,10 @@ mod platform {
     pub async fn revert() {
         let mut set = touched_links().await.lock().await;
         for iface in set.drain() {
-            let result = Command::new("resolvectl").args(["revert", &iface]).output().await;
+            let result = Command::new("resolvectl")
+                .args(["revert", &iface])
+                .output()
+                .await;
             match result {
                 Ok(out) if out.status.success() => {
                     info!("[NETGUARD] {iface}: DNS reverted via resolvectl");
@@ -444,7 +456,9 @@ mod platform {
                 .args(["domain", iface, "~."])
                 .output()
                 .await;
-            if let Ok(out) = domain_result && out.status.success() {
+            if let Ok(out) = domain_result
+                && out.status.success()
+            {
                 debug!("[NETGUARD] {iface}: resolvectl domain -> ~. (default route)");
             }
         }
@@ -453,7 +467,11 @@ mod platform {
     }
 
     async fn is_already_correct(iface: &str) -> bool {
-        let Ok(out) = Command::new("resolvectl").args(["dns", iface]).output().await else {
+        let Ok(out) = Command::new("resolvectl")
+            .args(["dns", iface])
+            .output()
+            .await
+        else {
             return false;
         };
         if !out.status.success() {

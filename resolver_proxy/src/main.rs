@@ -1,23 +1,27 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicBool},
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, cache};
 use clap::{Parser, Subcommand};
 use resolver_proxy::{
     LOCAL_DNS,
     conf::{load_conf, watch_conf_and_reload},
+    handler::{HandleQueryParams, handle_query},
 };
 use shared::{
-    Error, bind_udp_socket,
+    Error, bind_udp_socket, build_http_client,
+    cache::new_cache,
     constants::{
         BACKLOG_CAPACITY, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE,
     },
     domain_trie::DomainTrie,
     gen_relay_key,
     logger::init_logger,
+    metric_wrapper::MetricWrapper,
+    netguard::run_network_guard,
 };
 use tokio::sync::Semaphore;
 
@@ -66,11 +70,12 @@ async fn main() -> Result<(), Error> {
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
 
-    let (hotreload_conf, metric_conf) = {
+    let (hotreload_conf, metric_conf, vpn_reassertion) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.hotreload_conf.clone(),
             conf_read.metric_conf.clone(),
+            conf_read.vpn_reassertion,
         )
     };
 
@@ -87,6 +92,10 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         Arc::clone(&conf),
         Arc::clone(&rule_trie),
     ));
+    if vpn_reassertion {
+        tokio::spawn(run_network_guard(Arc::new(AtomicBool::new(true)))); // as we dont resolve in this app there is no need to track vpn status
+    };
+
     let metric_wrapper = if metric_conf.enable {
         let metric_wrapper = Arc::new(MetricWrapper::new());
         let metric_report_wrapper = Arc::clone(&metric_wrapper);
@@ -100,6 +109,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
+    let cache = Arc::new(new_cache());
+    let http = build_http_client()?;
 
     let (backlog_tx, mut backlog_rx) =
         tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr, tokio::time::Instant)>(
@@ -109,7 +120,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
     {
         let resolve_sem = Arc::clone(&resolve_sem);
+        let rule_trie = Arc::clone(&rule_trie);
         let metric_wrapper = metric_wrapper.clone();
+        let cache = Arc::clone(&cache);
+        let http = http.clone();
+        let server_socket = Arc::clone(&server_socket);
 
         tokio::spawn(async move {
             loop {
@@ -133,9 +148,23 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     return;
                 };
                 let metric_wrapper = metric_wrapper.clone();
+                let rule_trie = rule_trie.load_full();
+                let http = http.clone();
+                let cache = Arc::clone(&cache);
+                let server_socket = Arc::clone(&server_socket);
 
                 tokio::spawn(async move {
                     let _permit = permit;
+                    let params = HandleQueryParams {
+                        payload: &payload,
+                        src_addr,
+                        rule_trie: &rule_trie,
+                        server_socket: &server_socket,
+                        http: &http,
+                        cache: &cache,
+                        metric_wrapper: metric_wrapper.as_ref(),
+                    };
+                    handle_query(&params).await
                     // handle query
                 });
             }
@@ -166,7 +195,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         if let Some(metric_wrapper) = metric_wrapper.as_ref() {
             metric_wrapper
                 .total_req
-                .fetch_add(batch.len() as u64, Relaxed);
+                .fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
 
         for (payload, src_addr) in batch {
@@ -180,9 +209,23 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 continue;
             };
             let metric_wrapper = metric_wrapper.clone();
+            let rule_trie = rule_trie.load_full();
+            let http = http.clone();
+            let cache = Arc::clone(&cache);
+            let server_socket = Arc::clone(&server_socket);
 
             tokio::spawn(async move {
                 let _permit = permit;
+                let params = HandleQueryParams {
+                    payload: &payload,
+                    src_addr,
+                    rule_trie: &rule_trie,
+                    server_socket: &server_socket,
+                    http: &http,
+                    cache: &cache,
+                    metric_wrapper: metric_wrapper.as_ref(),
+                };
+                handle_query(&params).await
                 // handle query
             });
         }

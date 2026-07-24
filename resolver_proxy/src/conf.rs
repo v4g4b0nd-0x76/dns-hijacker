@@ -16,6 +16,11 @@ pub struct Conf {
     pub hotreload_conf: HotreloadConf,
     #[serde(default)]
     pub metric_conf: MetricConf,
+    #[serde(default = "default_false")]
+    pub vpn_reassertion: bool,
+}
+fn default_false() -> bool {
+    false
 }
 
 #[derive(Default, Clone, Deserialize)]

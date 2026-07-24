@@ -13,10 +13,8 @@ use std::{
 
 use crate::{
     cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
-    constants::RESOLVE_TIMEOUT,
     dns::{
-        craft_nxdomain_response, craft_redirect_response, craft_servfail_response, parse_a_records,
-        parse_domain, with_txid,
+        craft_nxdomain_response, craft_redirect_response, parse_a_records, parse_domain, with_txid,
     },
     errors::Error,
     metric_wrapper::MetricWrapper,
@@ -24,19 +22,13 @@ use crate::{
     resolver::{DoqPool, ResolverPicker, resolve_from_upstream},
 };
 use crossbeam_queue::ArrayQueue;
-use shared::domain_trie::{DomainTrie, RuleMatch, check_rules};
+use shared::{
+    constants::RESOLVE_TIMEOUT,
+    dns::{send, send_servfail},
+    domain_trie::{DomainTrie, RuleMatch, check_rules},
+};
 use tokio::{io::AsyncWriteExt, net::UdpSocket, time::timeout};
 use tracing::{debug, error, warn};
-
-async fn send(server_socket: &UdpSocket, src_addr: SocketAddr, resp: Vec<u8>) {
-    let _ = server_socket.send_to(&resp, src_addr).await;
-}
-
-async fn send_servfail(server_socket: &UdpSocket, src_addr: SocketAddr, payload: &[u8]) {
-    if let Some(resp) = craft_servfail_response(payload) {
-        send(server_socket, src_addr, resp).await;
-    }
-}
 
 pub struct HandleQueryParams<'a> {
     pub payload: &'a [u8],

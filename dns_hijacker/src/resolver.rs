@@ -1,4 +1,7 @@
-use shared::constants::DNS_PROBE_PACKET;
+use shared::{
+    build_http_client,
+    constants::{DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
+};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -19,9 +22,7 @@ use tokio::{
 
 use crate::{
     conf::ResolverSearchingConf,
-    constants::{
-        DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SEARCH_RESOLVER_INTERVAL, UDP_PROBE_TIMEOUT,
-    },
+    constants::{SEARCH_RESOLVER_INTERVAL, UDP_PROBE_TIMEOUT},
     dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
     helpers::get_public_ip,
@@ -183,15 +184,6 @@ impl ResolverPicker {
         let ips = parse_a_records(&reply);
         Ok(ips)
     }
-}
-
-pub fn build_http_client() -> Result<reqwest::Client, Error> {
-    reqwest::Client::builder()
-        .timeout(RESOLVE_TIMEOUT)
-        .connect_timeout(DOH_CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| Error::Config(format!("failed to build HTTP client: {err}")))
 }
 
 #[inline(always)]
@@ -740,10 +732,10 @@ impl DoqPool {
     }
     #[cfg(test)]
     pub fn evict(&self, resolver: &str) {
-        if let Ok(mut guard) = self.connections.write() {
-            if let Some(conn) = guard.remove(resolver) {
-                conn.close(0u32.into(), b"evicted for test");
-            }
+        if let Ok(mut guard) = self.connections.write()
+            && let Some(conn) = guard.remove(resolver)
+        {
+            conn.close(0u32.into(), b"evicted for test");
         }
     }
 }

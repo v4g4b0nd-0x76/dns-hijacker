@@ -11,6 +11,10 @@ pub const BACKLOG_CAPACITY: usize = 1024; // bounded, ~2x semaphore size
 pub const PAYLOAD_BUF_SIZE: usize = 1024;
 pub const RECV_BATCH_MAX: usize = 256; // drain more per wakeup during bursts
 pub const MAX_BACKLOG_AGE_MS: u64 = 800; // drop entries older than this (client will have retried)
+pub const NETGUARD_POLL_INTERVAL_MS: u64 = 1500;
+pub const DNS_TARGET: &str = "127.0.0.1";
+pub const VPN_IFACE_PREFIXES: &[&str] = &["utun", "ipsec", "ppp", "tun", "tap"];
+pub const DOH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Minimal DNS query for `google.com` A record, used as a health-check probe.
 pub const DNS_PROBE_PACKET: &[u8] = &[
