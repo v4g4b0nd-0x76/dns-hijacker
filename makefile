@@ -13,7 +13,7 @@ build-mac:
 	@./scripts/build.sh mac
 
 test:
-	@cargo test
+	@cargo test --bin dns_hijacker
 
 run: build
 	@./target/release/dns-hijacker 2>/dev/null || \

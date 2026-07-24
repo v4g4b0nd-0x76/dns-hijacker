@@ -1,0 +1,72 @@
+[package]
+name = "dns_hijacker"
+version = "1.5.9"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.228", default-features = false, features = [
+    "derive",
+    "std",
+] }
+tokio = { version = "1.52.3", default-features = false, features = [
+    "rt",
+    "process",
+    "fs",
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "sync",
+    "time",
+] }
+toml = { version = "1.1.2", default-features = false, features = [
+    "parse",
+    "serde",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+lru = "0.12"
+socket2 = "0.5"
+tracing = "0.1.44"
+# No env-filter/ansi: drops regex-automata and nu-ansi-term from the binary.
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "fmt",
+    "std",
+] }
+arc-swap = "1.9.2"
+clap = { version = "4.6.1", features = ["derive"] }
+rand = "0.10.2"
+aes-gcm = "0.10"
+base64 = "0.21"
+url = "2.5.8"
+hmac = "0.12"
+sha2 = "0.10"
+serde_json = "1.0.150"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
+webpki-roots = "0.26"
+crossbeam-queue = "0.3.13"
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+[profile.release]
+# Size-first release build; LTO still inlines across crates for hot paths.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = false
+
+[profile.release-perf]
+inherits = "release"
+# Prefer speed/inlining over minimal size when needed.
+opt-level = 3
+
+[features]
+rand_core = []
