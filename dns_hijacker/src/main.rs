@@ -1,14 +1,11 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client,
+    Error, ResolverPicker, build_http_client,
     conf::watch_conf_and_reload,
-    constants::{
-        BACKLOG_CAPACITY, LOCAL_DNS, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX,
-        RESOLVE_SEMAPHORE,
-    },
+    constants::{BACKLOG_CAPACITY, LOCAL_DNS},
     gen_relay_key, handle_query,
-    handler::{DomainTrie, HandleQueryParams, HistoryBuffer},
+    handler::{HandleQueryParams, HistoryBuffer},
     helpers::clear_screen,
     init_logger, load_conf,
     metric_wrapper::MetricWrapper,
@@ -17,6 +14,11 @@ use dns_hijacker::{
     relay::{RelayPicker, resolve_domain_via_relay},
     resolver::{DoqPool, Resolver},
     run_resolver_finder,
+};
+use shared::{
+    bind_udp_socket,
+    constants::{MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
+    domain_trie::DomainTrie,
 };
 use std::{
     io,
@@ -301,14 +303,10 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         for (payload, src_addr) in batch {
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
                 match backlog_tx.try_send((payload, src_addr, tokio::time::Instant::now())) {
-                    Ok(_) => {
-                        if let Some(m) = metric_wrapper.as_ref() {
-                            m.total_req.fetch_add(0, Relaxed);
-                        }
-                    }
                     Err(_) => {
                         warn!("semaphore and backlog both full, dropping query");
                     }
+                    _ => {}
                 }
                 continue;
             };
@@ -364,7 +362,7 @@ fn check_conf(conf_path: &PathBuf) -> Result<(), Error> {
 fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     for domain in &conf.drop_list {
-        println!("DROP    {domain}");
+        println!("DROPu   {domain}");
     }
     for (from, to) in &conf.redirect_list {
         println!("REDIRECT {from} -> {to}");

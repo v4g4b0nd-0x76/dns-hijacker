@@ -1,6 +1,5 @@
-use std::{fmt, io};
-
 use crate::constants::RESOLVE_TIMEOUT;
+use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum Error {
@@ -13,7 +12,7 @@ pub enum Error {
     NoHealthyResolvers,
     ResolveTimeout,
     Other(String),
-    RelayErr(String)
+    RelayErr(String),
 }
 
 #[derive(Debug)]
@@ -60,7 +59,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::ResolveTimeout => write!(f, "resolve timed out after {RESOLVE_TIMEOUT:?}"),
-            Error::Other(err) => write!(f , "Error: {err:?}"),
+            Error::Other(err) => write!(f, "Error: {err:?}"),
             Error::RelayErr(err) => write!(f, "Relay error: {err:?}"),
         }
     }

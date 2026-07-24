@@ -26,14 +26,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
-lru = "0.12"
 socket2 = "0.5"
 tracing = "0.1.44"
-# No env-filter/ansi: drops regex-automata and nu-ansi-term from the binary.
-tracing-subscriber = { version = "0.3.23", default-features = false, features = [
-    "fmt",
-    "std",
-] }
 arc-swap = "1.9.2"
 clap = { version = "4.6.1", features = ["derive"] }
 rand = "0.10.2"

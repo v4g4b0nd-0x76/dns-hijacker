@@ -347,7 +347,6 @@ dependencies = [
  "clap",
  "crossbeam-queue",
  "hmac",
- "lru",
  "quinn",
  "rand",
  "reqwest",
@@ -361,7 +360,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "webpki-roots 0.26.11",
 ]
@@ -1152,7 +1150,18 @@ dependencies = [
 name = "resolver_proxy"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "clap",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
  "shared",
+ "socket2 0.5.10",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -1424,6 +1433,19 @@ dependencies = [
 [[package]]
 name = "shared"
 version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.21.7",
+ "lru",
+ "rand",
+ "reqwest",
+ "serde",
+ "socket2 0.5.10",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "shlex"

@@ -1,8 +1,9 @@
 use crate::ResponseCache;
 use crate::cache::remove_domains_from_cache;
 use crate::errors::Error;
-use crate::handler::DomainTrie;
 use serde::Deserialize;
+use shared::domain_trie::DomainTrie;
+use shared::metric_wrapper::MetricConf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{path::PathBuf, sync::RwLock};
@@ -11,7 +12,7 @@ use tokio::time::{Duration, interval};
 #[derive(Default, Deserialize)]
 pub struct Conf {
     pub drop_list: Vec<String>,
-    #[serde(deserialize_with = "deserialize_redirect_list")]
+    #[serde(deserialize_with = "shared::deserialize_redirect_list")]
     pub redirect_list: Vec<(String, String)>,
     pub resolvers: Vec<String>,
     #[serde(default)]
@@ -30,26 +31,8 @@ pub struct Conf {
     pub record_history: bool,
 }
 
-#[derive(Clone, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MetricReportType {
-    #[default]
-    Log,
-    Http,
-}
-
-#[derive(Clone, Default, Deserialize)]
-pub struct MetricConf {
-    pub enable: bool,
-    pub report_type: MetricReportType,
-    #[serde(default = "default_report_interval")]
-    pub report_interval: u64,
-}
 fn default_false() -> bool {
     false
-}
-fn default_report_interval() -> u64 {
-    30
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -101,26 +84,6 @@ pub struct ResolverSearchingConf {
     pub resfresh_interval: Option<u64>,
     pub ipv4: bool,
     pub doh: bool,
-}
-fn deserialize_redirect_list<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    use serde::de::Error;
-
-    let entries = Vec::<String>::deserialize(deserializer)?;
-
-    entries
-        .into_iter()
-        .map(|entry| {
-            let (domain, target) = entry
-                .split_once(':')
-                .ok_or_else(|| D::Error::custom(format!("invalid redirect entry: {entry}")))?;
-
-            Ok((domain.to_owned(), target.to_owned()))
-        })
-        .collect()
 }
 
 pub fn load_conf(path: &PathBuf) -> Result<Conf, Error> {

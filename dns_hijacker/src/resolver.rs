@@ -1,3 +1,4 @@
+use shared::constants::DNS_PROBE_PACKET;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -19,8 +20,7 @@ use tokio::{
 use crate::{
     conf::ResolverSearchingConf,
     constants::{
-        DNS_PROBE_PACKET, DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SEARCH_RESOLVER_INTERVAL,
-        UDP_PROBE_TIMEOUT,
+        DOH_CONNECT_TIMEOUT, RESOLVE_TIMEOUT, SEARCH_RESOLVER_INTERVAL, UDP_PROBE_TIMEOUT,
     },
     dns::{build_lookup_query, parse_a_records, set_ecs_option},
     errors::{DohError, Error},
