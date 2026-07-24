@@ -355,6 +355,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shared",
  "socket2 0.5.10",
  "tempfile",
  "tokio",
@@ -1150,6 +1151,9 @@ dependencies = [
 [[package]]
 name = "resolver_proxy"
 version = "0.1.0"
+dependencies = [
+ "shared",
+]
 
 [[package]]
 name = "ring"
