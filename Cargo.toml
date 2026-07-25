@@ -3,7 +3,7 @@ resolver = "3"
 members = ["dns_hijacker", "resolver_proxy", "shared"]
 
 [workspace.package]
-version = "1.6.0"
+version = "1.6.1"
 
 [profile.release]
 opt-level = "z"
