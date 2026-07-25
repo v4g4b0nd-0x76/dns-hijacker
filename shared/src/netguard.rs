@@ -283,7 +283,7 @@ mod platform {
     use tokio::sync::Mutex as TokioMutex;
     use tracing::debug;
 
-    use crate::constants::{VPN_IFACE_PREFIXES, dns_target};
+    use crate::constants::VPN_IFACE_PREFIXES;
 
     /// Interfaces we've set DNS on via resolvectl — tracked so `revert()`
     /// touches exactly these, nothing else (never docker0/br-*/veth*, etc).
@@ -293,7 +293,7 @@ mod platform {
         TOUCHED_LINKS.get_or_init(|| TokioMutex::new(HashSet::new()))
     }
 
-    pub async fn tick(is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
+    pub async fn tick(is_vpn_active: &Arc<AtomicBool>, dns_target: &str) -> Result<(), String> {
         let vpn_iface = detect_vpn_interface().await?;
         let vpn_now = vpn_iface.is_some();
         let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
@@ -333,7 +333,7 @@ mod platform {
             return Err("no target interface found for DNS reassertion".into());
         }
 
-        reassert_via_resolvectl(&targets).await
+        reassert_via_resolvectl(&targets, dns_target).await
     }
 
     /// Undoes DNS overrides on every interface we've touched, via
@@ -416,7 +416,10 @@ mod platform {
     /// Sets DNS + default-route domain on exactly the given interfaces,
     /// skipping any that already report 127.0.0.1 to avoid redundant calls
     /// and log spam every tick.
-    async fn reassert_via_resolvectl(targets: &HashSet<String>) -> Result<(), String> {
+    async fn reassert_via_resolvectl(
+        targets: &HashSet<String>,
+        dns_target: &str,
+    ) -> Result<(), String> {
         // Sanity check resolvectl/systemd-resolved is actually present
         // before we start issuing per-interface calls.
         let status_output = Command::new("resolvectl")
@@ -429,7 +432,7 @@ mod platform {
         }
 
         for iface in targets {
-            if is_already_correct(iface).await {
+            if is_already_correct(iface, dns_target).await {
                 debug!("[NETGUARD] {iface}: DNS already {dns_target}, skipping");
                 touched_links().await.lock().await.insert(iface.clone());
                 continue;
@@ -466,7 +469,7 @@ mod platform {
         Ok(())
     }
 
-    async fn is_already_correct(iface: &str) -> bool {
+    async fn is_already_correct(iface: &str, dns_target: &str) -> bool {
         let Ok(out) = Command::new("resolvectl")
             .args(["dns", iface])
             .output()
