@@ -18,6 +18,46 @@ pub struct Conf {
     pub metric_conf: MetricConf,
     #[serde(default = "default_false")]
     pub vpn_reassertion: bool,
+    pub targets_conf: ProxyConf,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyTarget {
+    pub name: String,
+    pub mode: TransportMode, // "plain" | "udp_obfs" | "tls" (tls not covered here yet)
+    pub address: String,     // ip:port, or domain:port for tls
+    #[serde(default)]
+    pub shared_key: Option<String>, // required for udp_obfs / tls
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportMode {
+    Plain,
+    UdpObfs,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyConf {
+    pub listen_addr: String, // e.g. "127.0.0.1:53"
+    pub targets: Vec<ProxyTarget>,
+    #[serde(default = "default_strategy")]
+    pub strategy: ProxyStrategy, // "ordered" | "round_robin"
+    #[serde(default = "default_upstream_timeout_ms")]
+    pub upstream_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyStrategy {
+    Ordered,
+    RoundRobin,
+}
+
+fn default_strategy() -> ProxyStrategy {
+    ProxyStrategy::Ordered
+}
+fn default_upstream_timeout_ms() -> u64 {
+    2_000
 }
 fn default_false() -> bool {
     false

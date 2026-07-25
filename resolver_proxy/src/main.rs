@@ -4,15 +4,15 @@ use std::{
     time::Duration,
 };
 
-use arc_swap::{ArcSwap, cache};
+use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use resolver_proxy::{
     LOCAL_DNS,
     conf::{load_conf, watch_conf_and_reload},
-    handler::{HandleQueryParams, handle_query},
+    handler::{HandleQueryParams, TargetPicker, handle_query, resolve_targets},
 };
 use shared::{
-    Error, bind_udp_socket, build_http_client,
+    Error, bind_udp_socket,
     cache::new_cache,
     constants::{
         BACKLOG_CAPACITY, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE,
@@ -22,6 +22,7 @@ use shared::{
     logger::init_logger,
     metric_wrapper::MetricWrapper,
     netguard::run_network_guard,
+    obfs::ObfsKey,
 };
 use tokio::sync::Semaphore;
 
@@ -52,6 +53,7 @@ enum Commands {
     ListRules,
 
     GenRelayKey,
+    GenObfsKey,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -64,18 +66,20 @@ async fn main() -> Result<(), Error> {
         Commands::CheckConf => check_conf(&cli.conf),
         Commands::ListRules => list_rules(&cli.conf),
         Commands::GenRelayKey => gen_relay_key(&cli.conf),
+        Commands::GenObfsKey => gen_obfs_key(),
     }
 }
 
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
 
-    let (hotreload_conf, metric_conf, vpn_reassertion) = {
+    let (hotreload_conf, metric_conf, vpn_reassertion, targets_conf) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.hotreload_conf.clone(),
             conf_read.metric_conf.clone(),
             conf_read.vpn_reassertion,
+            conf_read.targets_conf.clone(),
         )
     };
 
@@ -106,11 +110,14 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     } else {
         None
     };
+    let target_picker = Arc::new(TargetPicker::new(
+        resolve_targets(&targets_conf)?,
+        targets_conf.strategy.clone(),
+    )?);
 
     let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
     let cache = Arc::new(new_cache());
-    let http = build_http_client()?;
 
     let (backlog_tx, mut backlog_rx) =
         tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr, tokio::time::Instant)>(
@@ -123,8 +130,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         let rule_trie = Arc::clone(&rule_trie);
         let metric_wrapper = metric_wrapper.clone();
         let cache = Arc::clone(&cache);
-        let http = http.clone();
         let server_socket = Arc::clone(&server_socket);
+        let target_picker = Arc::clone(&target_picker);
 
         tokio::spawn(async move {
             loop {
@@ -149,10 +156,10 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                 };
                 let metric_wrapper = metric_wrapper.clone();
                 let rule_trie = rule_trie.load_full();
-                let http = http.clone();
                 let cache = Arc::clone(&cache);
                 let server_socket = Arc::clone(&server_socket);
 
+                let target_picker = Arc::clone(&target_picker);
                 tokio::spawn(async move {
                     let _permit = permit;
                     let params = HandleQueryParams {
@@ -160,9 +167,9 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                         src_addr,
                         rule_trie: &rule_trie,
                         server_socket: &server_socket,
-                        http: &http,
                         cache: &cache,
                         metric_wrapper: metric_wrapper.as_ref(),
+                        target_picker: &target_picker,
                     };
                     handle_query(&params).await
                     // handle query
@@ -210,10 +217,10 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             };
             let metric_wrapper = metric_wrapper.clone();
             let rule_trie = rule_trie.load_full();
-            let http = http.clone();
             let cache = Arc::clone(&cache);
             let server_socket = Arc::clone(&server_socket);
 
+            let target_picker = Arc::clone(&target_picker);
             tokio::spawn(async move {
                 let _permit = permit;
                 let params = HandleQueryParams {
@@ -221,9 +228,9 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
                     src_addr,
                     rule_trie: &rule_trie,
                     server_socket: &server_socket,
-                    http: &http,
                     cache: &cache,
                     metric_wrapper: metric_wrapper.as_ref(),
+                    target_picker: &target_picker,
                 };
                 handle_query(&params).await
                 // handle query
@@ -257,5 +264,11 @@ fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
     for (from, to) in &conf.redirect_list {
         println!("REDIRECT {from} -> {to}");
     }
+    Ok(())
+}
+
+fn gen_obfs_key() -> Result<(), Error> {
+    let key = ObfsKey::generate_base64();
+    println!("{key}");
     Ok(())
 }

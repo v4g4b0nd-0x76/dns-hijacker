@@ -29,6 +29,26 @@ pub struct Conf {
     pub init_tls: bool,
     #[serde(default = "default_false")]
     pub record_history: bool,
+    #[serde(default)]
+    pub obfs_conf: ObfsConf,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ObfsConf {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default = "default_obfs_bind")]
+    pub bind_addr: String,
+    /// One or more base64 keys. Multiple keys let you run several
+    /// resolver_proxy deployments/clients against one dns_hijacker instance,
+    /// each with its own key — the AEAD tag itself tells you which key (if
+    /// any) a given packet was encrypted under.
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+fn default_obfs_bind() -> String {
+    "0.0.0.0:8853".to_string()
 }
 
 fn default_false() -> bool {

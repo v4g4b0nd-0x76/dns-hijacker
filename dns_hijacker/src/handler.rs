@@ -24,7 +24,7 @@ use crate::{
 use crossbeam_queue::ArrayQueue;
 use shared::{
     constants::RESOLVE_TIMEOUT,
-    dns::{send, send_servfail},
+    dns::{craft_servfail_response, send},
     domain_trie::{DomainTrie, RuleMatch, check_rules},
 };
 use tokio::{io::AsyncWriteExt, net::UdpSocket, time::timeout};
@@ -52,13 +52,16 @@ macro_rules! incr_metric {
     };
 }
 
-pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
+/// Runs the full drop/redirect/cache/resolve pipeline and returns the reply
+/// bytes (with the original transaction ID restored) if one should be sent.
+/// Does not send anything itself — callers decide how to deliver the bytes
+/// (plain UDP, obfs-encoded UDP, etc).
+pub async fn resolve_query<'a>(params: &HandleQueryParams<'a>) -> Option<Vec<u8>> {
     let HandleQueryParams {
         payload,
         src_addr,
         rule_trie,
         resolver_picker,
-        server_socket,
         http,
         cache,
         relay_picker,
@@ -66,50 +69,42 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
         is_vpn_active,
         doq_pool,
         history_buffer,
+        ..
     } = *params;
 
     if payload.len() < 12 {
         error!("invalid payload len");
-        return;
+        return None;
     }
-    let Some((domain, qname_end)) = parse_domain(payload, 12) else {
-        return;
-    };
+    let (domain, qname_end) = parse_domain(payload, 12)?;
     debug!("Resolving {}", domain);
 
     match check_rules(&domain, rule_trie) {
         RuleMatch::Drop => {
             warn!("[Dropped] {}", domain);
-            if let Some(resp) = craft_nxdomain_response(payload) {
-                incr_metric!(metric_wrapper, drop_count);
-                send(server_socket, src_addr, resp).await;
-            }
-            return;
+            let resp = craft_nxdomain_response(payload)?;
+            incr_metric!(metric_wrapper, drop_count);
+            return Some(resp);
         }
         RuleMatch::Redirect(ips) => {
             let ip_refs: Vec<&str> = ips.iter().map(String::as_str).collect();
             warn!("[REDIRECT] {} -> {:?}", domain, ip_refs);
-            if let Some(resp) = craft_redirect_response(payload, qname_end, ip_refs) {
-                incr_metric!(metric_wrapper, redirect_count);
-                send(server_socket, src_addr, resp).await;
-            }
-            return;
+            let resp = craft_redirect_response(payload, qname_end, ip_refs)?;
+            incr_metric!(metric_wrapper, redirect_count);
+            return Some(resp);
         }
         RuleMatch::None => {}
     }
 
-    let Some(cache_key) = cache_key_from_query(payload) else {
-        return;
-    };
+    let cache_key = cache_key_from_query(payload)?;
     let req_txid = [payload[0], payload[1]];
 
     if let Some(cached) = cache_lookup(cache, &cache_key) {
         debug!("[CACHE HIT] {}", domain);
-
         incr_metric!(metric_wrapper, cached_count);
-        send(server_socket, src_addr, with_txid(cached, req_txid)).await;
-        return;
+        return Some(with_txid(cached, req_txid));
     }
+
     let resolve_result: Result<Vec<u8>, Error> = if let Some(relay_picker) = relay_picker {
         let instance = relay_picker.pick();
         timeout(
@@ -121,7 +116,6 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
     } else {
         let resolver = resolver_picker
             .pick_doh_first(is_vpn_active.load(std::sync::atomic::Ordering::Relaxed));
-
         timeout(
             RESOLVE_TIMEOUT,
             resolve_from_upstream(payload, &resolver, src_addr, http, doq_pool),
@@ -140,7 +134,7 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
                 let ips: Vec<String> = a_records.iter().map(|ip| ip.to_string()).collect();
                 history_buffer.push_many(domain, ips);
             }
-            send(server_socket, src_addr, with_txid(reply_buf, req_txid)).await;
+            Some(with_txid(reply_buf, req_txid))
         }
         Err(Error::ResolveTimeout) => {
             error!(
@@ -148,13 +142,21 @@ pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
                 domain, RESOLVE_TIMEOUT
             );
             incr_metric!(metric_wrapper, timeout_count);
-            send_servfail(server_socket, src_addr, payload).await;
+            craft_servfail_response(payload)
         }
         Err(err) => {
             error!("failed to resolve {}: {}", domain, err);
             incr_metric!(metric_wrapper, failed_count);
-            send_servfail(server_socket, src_addr, payload).await;
+            craft_servfail_response(payload)
         }
+    }
+}
+
+/// Plain-UDP wrapper: resolves and sends the reply straight back over the
+/// socket the query arrived on. This is what the existing main loop calls.
+pub async fn handle_query<'a>(params: &HandleQueryParams<'a>) {
+    if let Some(resp) = resolve_query(params).await {
+        send(params.server_socket, params.src_addr, resp).await;
     }
 }
 

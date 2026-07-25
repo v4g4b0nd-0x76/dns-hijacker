@@ -6,6 +6,7 @@ pub mod errors;
 pub mod logger;
 pub mod metric_wrapper;
 pub mod netguard;
+pub mod obfs;
 #[cfg(test)]
 mod tests;
 use socket2::{Domain, Protocol, Socket, Type};
