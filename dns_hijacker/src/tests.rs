@@ -1,41 +1,31 @@
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroUsize,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::OsRng};
-use lru::LruCache;
+use shared::{
+    constants::RESOLVE_TIMEOUT,
+    domain_trie::{DomainTrie, DomainTriePolicy},
+    empty_cache, mock_query_google,
+};
 use tempfile::NamedTempFile;
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::{
-    cache::{
-        CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
-    },
+    cache::ResponseCache,
     conf::Conf,
-    constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET, RESOLVE_TIMEOUT},
     dns::{
         craft_nxdomain_response, craft_redirect_response, craft_servfail_response, min_answer_ttl,
         parse_domain, set_ecs_option, with_txid,
     },
-    handler::{DomainTrie, DomainTriePolicy, HandleQueryParams, HistoryBuffer, handle_query},
+    handler::{HandleQueryParams, HistoryBuffer, handle_query},
     metric_wrapper::MetricWrapper,
     relay::{RelayInstance, RelayPicker},
     resolver::{DoqPool, ResolverPicker, create_resolver},
 };
-
-fn empty_cache() -> ResponseCache {
-    Mutex::new(LruCache::new(
-        NonZeroUsize::new(16).expect("cache capacity"),
-    ))
-}
-
-fn mock_query_google() -> &'static [u8] {
-    DNS_PROBE_PACKET
-}
 
 fn mock_query_foo_test_com() -> Vec<u8> {
     vec![
@@ -43,7 +33,6 @@ fn mock_query_foo_test_com() -> Vec<u8> {
         b'o', 0x04, b't', b'e', b's', b't', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
     ]
 }
-
 fn mock_query_blocked_example() -> Vec<u8> {
     vec![
         0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'b', b'l',
@@ -55,6 +44,7 @@ fn mock_query_blocked_example() -> Vec<u8> {
 /// Small wrapper around `handle_query` that builds the `HandleQueryParams`
 /// struct for tests that don't exercise the relay path (relay_picker: None),
 /// so call sites below don't repeat the struct literal every time.
+#[allow(clippy::too_many_arguments)]
 async fn call_handle_query(
     payload: &[u8],
     src_addr: SocketAddr,
@@ -222,37 +212,11 @@ fn with_txid_rewrites_header_id() {
 }
 
 #[test]
-fn clamp_cache_ttl_bounds() {
-    assert_eq!(clamp_cache_ttl(1), CACHE_TTL_MIN);
-    assert_eq!(clamp_cache_ttl(60), Duration::from_secs(60));
-    assert_eq!(clamp_cache_ttl(10_000), CACHE_TTL_MAX);
-}
-
-#[test]
 fn min_answer_ttl_from_redirect_packet() {
     let query = mock_query_google().to_vec();
     let (_, qname_end) = parse_domain(&query, 12).unwrap();
     let resp = craft_redirect_response(&query, qname_end, vec!["1.2.3.4"]).unwrap();
     assert_eq!(min_answer_ttl(&resp), Some(60));
-}
-
-#[test]
-fn cache_store_and_lookup_rewrites_txid_on_serve() {
-    let cache = empty_cache();
-    let query = mock_query_google();
-    let key = cache_key_from_query(query).unwrap();
-    let (_, qname_end) = parse_domain(query, 12).unwrap();
-    let mut answer = craft_redirect_response(query, qname_end, vec!["9.9.9.9"]).unwrap();
-    answer[0] = 0x11;
-    answer[1] = 0x22;
-
-    cache_store(&cache, key.clone(), &answer);
-    let cached = cache_lookup(&cache, &key).expect("cached");
-    assert_eq!(&cached[..2], &[0, 0]);
-    let served = with_txid(cached, [0xAB, 0xCD]);
-    assert_eq!(&served[..2], &[0xAB, 0xCD]);
-    assert_eq!(&served[served.len() - 4..], &[9, 9, 9, 9]);
-    let _: CacheKey = key;
 }
 
 #[tokio::test]
@@ -665,11 +629,7 @@ async fn readds_ip_if_not_immediately_previous() {
     let data = read_history(file.path()).await;
     assert_eq!(
         data.get("x.com").unwrap(),
-        &vec![
-            "1.1.1.1".to_string(),
-            "8.9.9.9".to_string(),
-            "1.1.1.1".to_string()
-        ]
+        &vec!["1.1.1.1".to_string(), "8.9.9.9".to_string(),]
     );
 }
 

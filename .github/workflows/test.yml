@@ -1,25 +1,34 @@
 name: Test
-
 on:
   push:
-    branches: [main, master]
   pull_request:
-
 permissions:
   contents: read
-
 jobs:
-  test:
-    name: cargo test
+  test_dns_hijacker:
+    name: cargo test --bin dns_hijacker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
+        with:
+          shared-key: test-dns_hijacker
       - name: Run tests
-        run: cargo test
+        run: cargo test --bin dns_hijacker
+
+  test_resolver_proxy:
+    name: cargo test --bin resolver_proxy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-resolver_proxy
+      - name: Run tests
+        run: cargo test --bin resolver_proxy

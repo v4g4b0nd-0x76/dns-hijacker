@@ -6,13 +6,30 @@ use std::{
     time::Duration,
 };
 
+use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     time::interval,
 };
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricReportType {
+    #[default]
+    Log,
+    Http,
+}
 
-use crate::conf::{MetricConf, MetricReportType};
+#[derive(Clone, Default, Deserialize)]
+pub struct MetricConf {
+    pub enable: bool,
+    pub report_type: MetricReportType,
+    #[serde(default = "default_report_interval")]
+    pub report_interval: u64,
+}
+fn default_report_interval() -> u64 {
+    30
+}
 
 #[derive(Default)]
 pub struct MetricWrapper {

@@ -1,25 +1,28 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use dns_hijacker::{
-    Error, ResolverPicker, bind_udp_socket, build_http_client,
+    Error, ResolverPicker, ResponseCache,
     conf::watch_conf_and_reload,
-    constants::{
-        BACKLOG_CAPACITY, LOCAL_DNS, MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX,
-        RESOLVE_SEMAPHORE,
-    },
+    constants::BACKLOG_CAPACITY,
     gen_relay_key, handle_query,
-    handler::{DomainTrie, HandleQueryParams, HistoryBuffer},
+    handler::{HandleQueryParams, HistoryBuffer, resolve_query},
     helpers::clear_screen,
-    init_logger, load_conf,
-    metric_wrapper::MetricWrapper,
-    netguard::run_network_guard,
-    new_cache,
+    init_logger, load_conf, new_cache,
     relay::{RelayPicker, resolve_domain_via_relay},
     resolver::{DoqPool, Resolver},
     run_resolver_finder,
 };
+use shared::{
+    bind_udp_socket, build_http_client,
+    constants::{MAX_BACKLOG_AGE_MS, PAYLOAD_BUF_SIZE, RECV_BATCH_MAX, RESOLVE_SEMAPHORE},
+    domain_trie::DomainTrie,
+    metric_wrapper::MetricWrapper,
+    netguard::run_network_guard,
+    obfs::{LEN_PREFIX, NONCE_LEN, ObfsKey, PAD_MAX, TAG_LEN},
+};
 use std::{
     io,
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc, RwLock,
@@ -28,7 +31,7 @@ use std::{
     time::Duration,
 };
 use tokio::{net::UdpSocket, sync::Semaphore};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Parser)]
 #[command(
@@ -72,7 +75,7 @@ enum Commands {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Error> {
-    init_logger();
+    let _ = init_logger();
     let cli = Cli::parse();
     let conf = load_conf(&cli.conf)?;
     if conf.init_tls {
@@ -138,6 +141,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         relay_conf,
         vpn_reassertion,
         record_history,
+        obfs_conf,
+        dns_target,
     ) = {
         let conf_read = conf.read().unwrap();
         (
@@ -148,6 +153,8 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             conf_read.relay_conf.clone(),
             conf_read.vpn_reassertion,
             conf_read.record_history,
+            conf_read.obfs_conf.clone(),
+            conf_read.dns_target.clone(),
         )
     };
     let history_buffer = if record_history {
@@ -158,7 +165,15 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
     let is_vpn_active = if vpn_reassertion {
         let is_vpn_active = Arc::new(AtomicBool::new(false));
-        tokio::spawn(run_network_guard(Arc::clone(&is_vpn_active)));
+        let dns_server_clone = dns_target
+            .split(':')
+            .next()
+            .unwrap_or(&dns_target)
+            .to_string();
+        tokio::spawn(run_network_guard(
+            Arc::clone(&is_vpn_active),
+            dns_server_clone,
+        ));
         is_vpn_active
     } else {
         Arc::new(AtomicBool::new(false))
@@ -194,8 +209,38 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         });
     }
 
-    let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
+    let server_socket = Arc::new(bind_udp_socket(&dns_target)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
+
+    if obfs_conf.enable {
+        let obfs_keys: Vec<ObfsKey> = obfs_conf
+            .keys
+            .iter()
+            .filter_map(|k| ObfsKey::from_base64(k).ok())
+            .collect();
+
+        if obfs_keys.is_empty() {
+            error!("[obfs] enabled but no valid keys configured, skipping listener");
+        } else {
+            let obfs_socket = Arc::new(bind_udp_socket(&obfs_conf.bind_addr)?);
+            info!("[obfs] dns listener bound at {}", obfs_conf.bind_addr);
+
+            tokio::spawn(run_obfs_listener(
+                obfs_socket,
+                Arc::new(obfs_keys),
+                Arc::clone(&rule_trie),
+                resolver_picker.clone(),
+                http.clone(),
+                Arc::clone(&cache),
+                relay_pciker.clone(),
+                metric_wrapper.clone(),
+                Arc::clone(&is_vpn_active),
+                doq_pool.clone(),
+                history_buffer.clone(),
+                Arc::clone(&resolve_sem),
+            ));
+        }
+    }
 
     let (backlog_tx, mut backlog_rx) =
         tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr, tokio::time::Instant)>(
@@ -271,7 +316,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         });
     }
 
-    info!("dns server listening at {}", LOCAL_DNS);
+    info!("dns server listening at {}", &dns_target);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {
@@ -300,15 +345,11 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         }
         for (payload, src_addr) in batch {
             let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
-                match backlog_tx.try_send((payload, src_addr, tokio::time::Instant::now())) {
-                    Ok(_) => {
-                        if let Some(m) = metric_wrapper.as_ref() {
-                            m.total_req.fetch_add(0, Relaxed);
-                        }
-                    }
-                    Err(_) => {
-                        warn!("semaphore and backlog both full, dropping query");
-                    }
+                if backlog_tx
+                    .try_send((payload, src_addr, tokio::time::Instant::now()))
+                    .is_err()
+                {
+                    warn!("semaphore and backlog both full, dropping query");
                 }
                 continue;
             };
@@ -344,6 +385,115 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     }
 }
 
+const OBFS_PAYLOAD_BUF_SIZE: usize =
+    PAYLOAD_BUF_SIZE + NONCE_LEN + TAG_LEN + LEN_PREFIX + PAD_MAX + 64; // slack margin
+
+const OBFS_RECV_BATCH_MAX: usize = 64;
+
+#[allow(clippy::too_many_arguments)]
+async fn run_obfs_listener(
+    obfs_socket: Arc<UdpSocket>,
+    keys: Arc<Vec<ObfsKey>>,
+    rule_trie: Arc<ArcSwap<DomainTrie>>,
+    resolver_picker: ResolverPicker,
+    http: reqwest::Client,
+    cache: Arc<ResponseCache>,
+    relay_picker: Option<Arc<RelayPicker>>,
+    metric_wrapper: Option<Arc<MetricWrapper>>,
+    is_vpn_active: Arc<AtomicBool>,
+    doq_pool: Arc<DoqPool>,
+    history_buffer: Option<Arc<HistoryBuffer>>,
+    resolve_sem: Arc<Semaphore>,
+) {
+    let mut buf = [0u8; OBFS_PAYLOAD_BUF_SIZE];
+
+    loop {
+        let (len, src_addr) = match obfs_socket.recv_from(&mut buf).await {
+            Ok(res) => res,
+            Err(err) => {
+                error!("[obfs] failed to receive payload: {}", err);
+                continue;
+            }
+        };
+
+        // Drain everything already queued on the socket into one batch,
+        // same as the plain-DNS listener does, instead of dispatching one
+        // spawn per recv() call.
+        let mut batch: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(OBFS_RECV_BATCH_MAX);
+        batch.push((buf[..len].to_vec(), src_addr));
+        while batch.len() < OBFS_RECV_BATCH_MAX {
+            match obfs_socket.try_recv_from(&mut buf) {
+                Ok((n, addr)) => batch.push((buf[..n].to_vec(), addr)),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) => {
+                    error!("[obfs] failed to drain payload: {}", err);
+                    break;
+                }
+            }
+        }
+
+        if let Some(metric_wrapper) = metric_wrapper.as_ref() {
+            metric_wrapper
+                .total_req
+                .fetch_add(batch.len() as u64, Relaxed);
+        }
+
+        for (datagram, src_addr) in batch {
+            // Try each configured key; the AEAD tag is the only signal for
+            // which (if any) key a packet was encrypted under. Anything
+            // that fails every key is dropped silently — no reply, so
+            // active probing learns nothing.
+            let Some((key_idx, query)) = keys
+                .iter()
+                .enumerate()
+                .find_map(|(i, key)| key.decode(&datagram).map(|q| (i, q)))
+            else {
+                debug!("[obfs] undecodable packet from {}", src_addr);
+                continue;
+            };
+
+            let Ok(permit) = resolve_sem.clone().try_acquire_owned() else {
+                warn!("[obfs] semaphore full, dropping query from {}", src_addr);
+                continue;
+            };
+
+            let rule_trie = rule_trie.load_full();
+            let http = http.clone();
+            let resolver_picker = resolver_picker.clone();
+            let obfs_socket = Arc::clone(&obfs_socket);
+            let cache = Arc::clone(&cache);
+            let relay_picker = relay_picker.clone();
+            let metric_wrapper = metric_wrapper.clone();
+            let is_vpn_active = Arc::clone(&is_vpn_active);
+            let doq_pool = doq_pool.clone();
+            let history_buffer = history_buffer.clone();
+            let key = keys[key_idx].clone();
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                let params = HandleQueryParams {
+                    payload: &query,
+                    src_addr,
+                    rule_trie: &rule_trie,
+                    resolver_picker: &resolver_picker,
+                    server_socket: &obfs_socket, // unused by resolve_query; kept for struct shape
+                    http: &http,
+                    cache: &cache,
+                    relay_picker: relay_picker.as_deref(),
+                    metric_wrapper: metric_wrapper.as_ref(),
+                    is_vpn_active: &is_vpn_active,
+                    doq_pool: &doq_pool,
+                    history_buffer: history_buffer.as_ref(),
+                };
+
+                if let Some(resp) = resolve_query(&params).await {
+                    let encoded = key.encode(&resp);
+                    let _ = obfs_socket.send_to(&encoded, src_addr).await;
+                }
+            });
+        }
+    }
+}
 fn check_conf(conf_path: &PathBuf) -> Result<(), Error> {
     match load_conf(conf_path) {
         Ok(conf) => {
@@ -364,7 +514,7 @@ fn check_conf(conf_path: &PathBuf) -> Result<(), Error> {
 fn list_rules(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = load_conf(conf_path)?;
     for domain in &conf.drop_list {
-        println!("DROP    {domain}");
+        println!("DROPu   {domain}");
     }
     for (from, to) in &conf.redirect_list {
         println!("REDIRECT {from} -> {to}");
