@@ -28,8 +28,6 @@ use tokio::{net::UdpSocket, time::timeout};
 use crate::conf::{ProxyConf, ProxyStrategy, TransportMode};
 
 const PROXY_PAYLOAD_BUF_SIZE: usize = 4096;
-const PROXY_RECV_BATCH_MAX: usize = 64;
-const PROXY_RESOLVE_SEMAPHORE: usize = 512;
 pub struct HandleQueryParams<'a> {
     pub payload: &'a [u8],
     pub src_addr: SocketAddr,

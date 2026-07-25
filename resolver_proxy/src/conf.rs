@@ -9,8 +9,12 @@ use shared::Error;
 use shared::deserialize_redirect_list;
 #[derive(Deserialize)]
 pub struct Conf {
+    #[serde(default = "default_empty_vec")]
     pub drop_list: Vec<String>,
-    #[serde(deserialize_with = "deserialize_redirect_list")]
+    #[serde(
+        deserialize_with = "deserialize_redirect_list",
+        default = "default_empty_vec"
+    )]
     pub redirect_list: Vec<(String, String)>,
     #[serde(default)]
     pub hotreload_conf: HotreloadConf,
@@ -18,7 +22,15 @@ pub struct Conf {
     pub metric_conf: MetricConf,
     #[serde(default = "default_false")]
     pub vpn_reassertion: bool,
-    pub targets_conf: ProxyConf,
+    pub targets: ProxyConf,
+    #[serde(default = "default_dns_target")]
+    pub dns_target: String,
+}
+fn default_empty_vec<T>() -> Vec<T> {
+    Vec::new()
+}
+fn default_dns_target() -> String {
+    String::from("127.0.0.1:53")
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyTarget {

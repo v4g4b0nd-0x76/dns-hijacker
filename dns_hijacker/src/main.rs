@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use dns_hijacker::{
     Error, ResolverPicker, ResponseCache,
     conf::watch_conf_and_reload,
-    constants::{BACKLOG_CAPACITY, LOCAL_DNS},
+    constants::BACKLOG_CAPACITY,
     gen_relay_key, handle_query,
     handler::{HandleQueryParams, HistoryBuffer, resolve_query},
     helpers::clear_screen,
@@ -75,7 +75,7 @@ enum Commands {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Error> {
-    init_logger();
+    let _ = init_logger();
     let cli = Cli::parse();
     let conf = load_conf(&cli.conf)?;
     if conf.init_tls {
@@ -142,6 +142,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         vpn_reassertion,
         record_history,
         obfs_conf,
+        dns_target,
     ) = {
         let conf_read = conf.read().unwrap();
         (
@@ -153,6 +154,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             conf_read.vpn_reassertion,
             conf_read.record_history,
             conf_read.obfs_conf.clone(),
+            conf_read.dns_target.clone(),
         )
     };
     let history_buffer = if record_history {
@@ -163,7 +165,15 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
 
     let is_vpn_active = if vpn_reassertion {
         let is_vpn_active = Arc::new(AtomicBool::new(false));
-        tokio::spawn(run_network_guard(Arc::clone(&is_vpn_active)));
+        let dns_server_clone = dns_target
+            .split(':')
+            .next()
+            .unwrap_or(&dns_target)
+            .to_string();
+        tokio::spawn(run_network_guard(
+            Arc::clone(&is_vpn_active),
+            dns_server_clone,
+        ));
         is_vpn_active
     } else {
         Arc::new(AtomicBool::new(false))
@@ -199,7 +209,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         });
     }
 
-    let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
+    let server_socket = Arc::new(bind_udp_socket(&dns_target)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
 
     if obfs_conf.enable {
@@ -306,7 +316,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         });
     }
 
-    info!("dns server listening at {}", LOCAL_DNS);
+    info!("dns server listening at {}", &dns_target);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {

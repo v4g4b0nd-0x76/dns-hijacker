@@ -1,12 +1,7 @@
-use std::{num::NonZeroUsize, sync::Mutex, time::Duration};
+use std::time::Duration;
 
-use lru::LruCache;
-use tokio::net::UdpSocket;
-
-use crate::cache::{
-    CacheKey, ResponseCache, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl,
-};
-use crate::constants::{CACHE_TTL_MAX, CACHE_TTL_MIN, DNS_PROBE_PACKET};
+use crate::cache::{CacheKey, cache_key_from_query, cache_lookup, cache_store, clamp_cache_ttl};
+use crate::constants::{CACHE_TTL_MAX, CACHE_TTL_MIN};
 use crate::dns::{craft_redirect_response, parse_domain, with_txid};
 use crate::domain_trie::{DomainTrie, DomainTriePolicy};
 use crate::{empty_cache, mock_query_google};

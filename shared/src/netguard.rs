@@ -19,12 +19,12 @@ use tracing::{info, warn};
 use crate::constants::NETGUARD_POLL_INTERVAL_MS;
 
 /// individual check fails, since a transient tool hiccup shouldn't kill the guard.
-pub async fn run_network_guard(is_vpn_active: Arc<AtomicBool>) {
+pub async fn run_network_guard(is_vpn_active: Arc<AtomicBool>, dns_target: String) {
     let interval = Duration::from_millis(NETGUARD_POLL_INTERVAL_MS);
     info!("[NETGUARD] starting DNS reassertion + VPN detection loop");
 
     loop {
-        if let Err(err) = platform::tick(&is_vpn_active).await {
+        if let Err(err) = platform::tick(&is_vpn_active, &dns_target).await {
             warn!("[NETGUARD] tick failed: {err}");
         }
         sleep(interval).await;
@@ -40,12 +40,12 @@ pub async fn revert() {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use crate::constants::VPN_IFACE_PREFIXES;
+
     use super::*;
     use std::{collections::HashSet, process::Stdio, sync::OnceLock};
     use tokio::{io::AsyncWriteExt, sync::Mutex as TokioMutex};
     use tracing::debug;
-
-    use crate::constants::{DNS_TARGET, VPN_IFACE_PREFIXES};
 
     /// Network services we've overridden DNS on, plus whether we've set a
     /// scutil State: override (and for which service id) — needed to revert
@@ -66,7 +66,7 @@ mod platform {
         })
     }
 
-    pub async fn tick(is_vpn_active: &Arc<AtomicBool>) -> Result<(), String> {
+    pub async fn tick(is_vpn_active: &Arc<AtomicBool>, dns_target: &str) -> Result<(), String> {
         let vpn_now = detect_vpn_interface().await?;
         let vpn_was = is_vpn_active.swap(vpn_now, Relaxed);
 
@@ -84,15 +84,15 @@ mod platform {
         }
 
         if let Some(primary_id) = get_primary_service_id().await {
-            if let Err(e) = force_primary_dns_state(&primary_id).await {
+            if let Err(e) = force_primary_dns_state(&primary_id, dns_target).await {
                 warn!("[NETGUARD] failed to force primary State DNS: {e}");
             } else {
-                debug!("[NETGUARD] forced State:/Network/Service/{primary_id}/DNS -> {DNS_TARGET}");
+                debug!("[NETGUARD] forced State:/Network/Service/{primary_id}/DNS");
                 touched().await.lock().await.scutil_service_id = Some(primary_id);
             }
         }
 
-        reassert_dns_on_all_services().await
+        reassert_dns_on_all_services(dns_target).await
     }
 
     /// Undoes every override we've applied: clears the scutil State:
@@ -161,7 +161,7 @@ mod platform {
         Ok(false)
     }
 
-    async fn reassert_dns_on_all_services() -> Result<(), String> {
+    async fn reassert_dns_on_all_services(dns_target: &str) -> Result<(), String> {
         let list_output = Command::new("networksetup")
             .arg("-listallnetworkservices")
             .output()
@@ -178,13 +178,13 @@ mod platform {
             if service.is_empty() || service.starts_with('*') {
                 continue;
             }
-            reassert_dns_on_service(service).await;
+            reassert_dns_on_service(service, dns_target).await;
         }
 
         Ok(())
     }
 
-    async fn reassert_dns_on_service(service: &str) {
+    async fn reassert_dns_on_service(service: &str, dns_target: &str) {
         let current = Command::new("networksetup")
             .args(["-getdnsservers", service])
             .output()
@@ -193,13 +193,13 @@ mod platform {
         let already_correct = match &current {
             Ok(out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout);
-                text.lines().next().map(str::trim) == Some(DNS_TARGET)
+                text.lines().next().map(str::trim) == Some(dns_target)
             }
             _ => false,
         };
 
         if already_correct {
-            debug!("[NETGUARD] {service}: DNS already {DNS_TARGET}, skipping");
+            debug!("[NETGUARD] {service}: DNS already {dns_target}, skipping");
             touched()
                 .await
                 .lock()
@@ -209,15 +209,15 @@ mod platform {
             return;
         }
 
-        debug!("[NETGUARD] {service}: reasserting DNS -> {DNS_TARGET}");
+        debug!("[NETGUARD] {service}: reasserting DNS -> {dns_target}");
         let result = Command::new("networksetup")
-            .args(["-setdnsservers", service, DNS_TARGET])
+            .args(["-setdnsservers", service, dns_target])
             .output()
             .await;
 
         match result {
             Ok(out) if out.status.success() => {
-                info!("[NETGUARD] {service}: DNS reasserted to {DNS_TARGET}");
+                info!("[NETGUARD] {service}: DNS reasserted to {dns_target}");
                 touched()
                     .await
                     .lock()
@@ -267,9 +267,9 @@ mod platform {
             .map(|s| s.trim().to_string())
     }
 
-    async fn force_primary_dns_state(service_id: &str) -> Result<(), String> {
+    async fn force_primary_dns_state(service_id: &str, dns_target: &str) -> Result<(), String> {
         let script = format!(
-            "d.init\nd.add ServerAddresses * {DNS_TARGET}\nset State:/Network/Service/{service_id}/DNS\n"
+            "d.init\nd.add ServerAddresses * {dns_target}\nset State:/Network/Service/{service_id}/DNS\n"
         );
         run_scutil_script(&script).await?;
         Ok(())
@@ -283,7 +283,7 @@ mod platform {
     use tokio::sync::Mutex as TokioMutex;
     use tracing::debug;
 
-    use crate::constants::{DNS_TARGET, VPN_IFACE_PREFIXES};
+    use crate::constants::{VPN_IFACE_PREFIXES, dns_target};
 
     /// Interfaces we've set DNS on via resolvectl — tracked so `revert()`
     /// touches exactly these, nothing else (never docker0/br-*/veth*, etc).
@@ -430,19 +430,19 @@ mod platform {
 
         for iface in targets {
             if is_already_correct(iface).await {
-                debug!("[NETGUARD] {iface}: DNS already {DNS_TARGET}, skipping");
+                debug!("[NETGUARD] {iface}: DNS already {dns_target}, skipping");
                 touched_links().await.lock().await.insert(iface.clone());
                 continue;
             }
 
             let dns_result = Command::new("resolvectl")
-                .args(["dns", iface, DNS_TARGET])
+                .args(["dns", iface, dns_target])
                 .output()
                 .await
                 .map_err(|e| format!("resolvectl dns failed for {iface}: {e}"))?;
 
             if dns_result.status.success() {
-                info!("[NETGUARD] {iface}: DNS reasserted to {DNS_TARGET}");
+                info!("[NETGUARD] {iface}: DNS reasserted to {dns_target}");
                 touched_links().await.lock().await.insert(iface.clone());
             } else {
                 warn!(
@@ -477,7 +477,7 @@ mod platform {
         if !out.status.success() {
             return false;
         }
-        String::from_utf8_lossy(&out.stdout).contains(DNS_TARGET)
+        String::from_utf8_lossy(&out.stdout).contains(dns_target)
     }
 }
 

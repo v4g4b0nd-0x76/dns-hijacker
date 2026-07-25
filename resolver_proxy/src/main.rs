@@ -7,7 +7,6 @@ use std::{
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
 use resolver_proxy::{
-    LOCAL_DNS,
     conf::{load_conf, watch_conf_and_reload},
     handler::{HandleQueryParams, TargetPicker, handle_query, resolve_targets},
 };
@@ -58,7 +57,7 @@ enum Commands {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Error> {
-    init_logger();
+    let _ = init_logger();
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Commands::Run) {
@@ -73,13 +72,14 @@ async fn main() -> Result<(), Error> {
 async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
     let conf = Arc::new(RwLock::new(load_conf(conf_path)?));
 
-    let (hotreload_conf, metric_conf, vpn_reassertion, targets_conf) = {
+    let (hotreload_conf, metric_conf, vpn_reassertion, targets_conf, listen_addr) = {
         let conf_read = conf.read().unwrap();
         (
             conf_read.hotreload_conf.clone(),
             conf_read.metric_conf.clone(),
             conf_read.vpn_reassertion,
-            conf_read.targets_conf.clone(),
+            conf_read.targets.clone(),
+            conf_read.dns_target.clone(),
         )
     };
 
@@ -90,14 +90,25 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             &conf_read.redirect_list,
         )))
     };
-    tokio::spawn(watch_conf_and_reload(
-        conf_path.clone(),
-        Duration::from_millis(hotreload_conf.poll_interval_ms),
-        Arc::clone(&conf),
-        Arc::clone(&rule_trie),
-    ));
+    if hotreload_conf.enable {
+        tokio::spawn(watch_conf_and_reload(
+            conf_path.clone(),
+            Duration::from_millis(hotreload_conf.poll_interval_ms),
+            Arc::clone(&conf),
+            Arc::clone(&rule_trie),
+        ));
+    }
     if vpn_reassertion {
-        tokio::spawn(run_network_guard(Arc::new(AtomicBool::new(true)))); // as we dont resolve in this app there is no need to track vpn status
+        let listen_addr_clone = listen_addr
+            .split(':')
+            .next()
+            .unwrap_or(&listen_addr)
+            .to_string();
+
+        tokio::spawn(run_network_guard(
+            Arc::new(AtomicBool::new(true)),
+            listen_addr_clone,
+        )); // as we dont resolve in this app there is no need to track vpn status
     };
 
     let metric_wrapper = if metric_conf.enable {
@@ -115,7 +126,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         targets_conf.strategy.clone(),
     )?);
 
-    let server_socket = Arc::new(bind_udp_socket(LOCAL_DNS)?);
+    let server_socket = Arc::new(bind_udp_socket(&listen_addr)?);
     let resolve_sem = Arc::new(Semaphore::new(RESOLVE_SEMAPHORE));
     let cache = Arc::new(new_cache());
 
@@ -177,7 +188,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             }
         });
     }
-    tracing::info!("dns server listening at {}", LOCAL_DNS);
+    tracing::info!("dns server listening at {}", &listen_addr);
     let mut buf = [0u8; PAYLOAD_BUF_SIZE];
     loop {
         let (len, src_addr) = match server_socket.recv_from(&mut buf).await {

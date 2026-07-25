@@ -70,25 +70,35 @@ Each upstream target in `resolver_proxy`'s config can be given as either a bare 
 ## Config format
 
 ```toml
-[[targets]]
-name = "primary"
+dns_target = "127.0.0.1:5353"
+vpn_reassertion = false
+
+drop_list = [
+    "*.example.com",
+    "x.com",
+    "*.x.com",
+    # "*.linkedin.com",
+    # "linkedin.com",
+    "ads.youtube.com",
+    "./assets/google_ads_list.txt",
+]
+redirect_list = []
+
+[targets]
+listen_addr = "127.0.0.1:53"
+strategy = "ordered"
+upstream_timeout_ms = 2000
+
+[[targets.targets]]
+name = "primary_obfs"
 mode = "udp_obfs"
-address = "1.2.3.4:8853"        # ip:port
-shared_key = "<base64 key, from shared lib key-gen>"
-pad_min = 96
-pad_max = 256
+address = "127.0.0.1:8853"
+shared_key = "x6M+T32EXh5/sxGKQiYaApeXm2xd2ZT3YE8/SWhYVpE="
 
-[[targets]]
-name = "tls_fallback"
-mode = "tls"
-address = "resolver.example.com:443"   # domain — used as TLS SNI
-shared_key = "<base64 key, same value as above or a different per-target key>"
-# sni_override = "unrelated-looking-domain.com"   # optional, only for ip:port targets
-
-[[targets]]
+[[targets.targets]]
 name = "unfiltered_fallback"
 mode = "plain"
-address = "1.1.1.1:53"
+address = "127.0.0.1:53"
 ```
 
 `resolver_proxy` tries targets in order (or round-robins, depending on your `strategy` setting — see below), so a typical setup is one `udp_obfs` or `tls` target as primary with a `plain` target as a last-resort fallback for networks where obfuscation isn't needed or is itself failing.

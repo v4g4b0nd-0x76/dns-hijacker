@@ -11,6 +11,8 @@ use tokio::time::{Duration, interval};
 
 #[derive(Default, Deserialize)]
 pub struct Conf {
+    #[serde(default = "default_dns_target")]
+    pub dns_target: String,
     pub drop_list: Vec<String>,
     #[serde(deserialize_with = "shared::deserialize_redirect_list")]
     pub redirect_list: Vec<(String, String)>,
@@ -31,6 +33,9 @@ pub struct Conf {
     pub record_history: bool,
     #[serde(default)]
     pub obfs_conf: ObfsConf,
+}
+fn default_dns_target() -> String {
+    String::from("127.0.0.1:53")
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

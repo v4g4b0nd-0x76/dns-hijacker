@@ -44,6 +44,7 @@ fn mock_query_blocked_example() -> Vec<u8> {
 /// Small wrapper around `handle_query` that builds the `HandleQueryParams`
 /// struct for tests that don't exercise the relay path (relay_picker: None),
 /// so call sites below don't repeat the struct literal every time.
+#[allow(clippy::too_many_arguments)]
 async fn call_handle_query(
     payload: &[u8],
     src_addr: SocketAddr,

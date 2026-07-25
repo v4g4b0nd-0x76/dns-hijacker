@@ -15,7 +15,6 @@ pub use resolver::{ResolverPicker, run_resolver_finder};
 pub mod constants {
     use std::time::Duration;
 
-    pub const LOCAL_DNS: &str = "127.0.0.1:53";
     pub const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
     pub const SOCKET_BUF_SIZE: usize = 4 * 1024 * 1024;
     pub const SEARCH_RESOLVER_INTERVAL: u64 = 15;
@@ -23,7 +22,6 @@ pub mod constants {
     pub const BACKLOG_CAPACITY: usize = 1024; // bounded, ~2x semaphore size
 
     pub const NETGUARD_POLL_INTERVAL_MS: u64 = 1500;
-    pub const DNS_TARGET: &str = "127.0.0.1";
 }
 pub mod helpers {
     use crate::Error;
