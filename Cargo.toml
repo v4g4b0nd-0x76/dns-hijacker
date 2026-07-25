@@ -1,8 +1,18 @@
-[package]
-name = "dns_hijacker"
-version = "1.6.0"
-edition = "2024"
-
 [workspace]
-resolvers = 3
+resolver = "3"
 members = ["dns_hijacker", "resolver_proxy", "shared"]
+
+[workspace.package]
+version = "1.6.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = false
+
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
