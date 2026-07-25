@@ -1,3 +1,8 @@
+[package]
+name = "dns_hijacker"
+version = "1.5.9"
+edition = "2024"
+
 [workspace]
 resolvers = 3
 members = ["dns_hijacker", "resolver_proxy", "shared"]
