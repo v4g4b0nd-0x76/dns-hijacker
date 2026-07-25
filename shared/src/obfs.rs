@@ -3,7 +3,6 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, generic_array::GenericArray},
 };
 use rand::RngExt;
-use serde::Deserialize;
 
 pub const NONCE_LEN: usize = 12;
 pub const KEY_LEN: usize = 32;
