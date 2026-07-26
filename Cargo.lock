@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "dns_hijacker"
-version = "1.5.9"
+version = "1.6.1"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "resolver_proxy"
-version = "0.1.0"
+version = "1.6.1"
 dependencies = [
  "arc-swap",
  "clap",

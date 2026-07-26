@@ -34,7 +34,14 @@ Wire format, all of it inside one UDP datagram:
 [ 12-byte random nonce ][ AEAD ciphertext of: 2-byte length prefix || real DNS query || random padding ]
 ```
 
-- Encryption is ChaCha20-Poly1305 with a key shared out-of-band between `resolver_proxy` and `dns_hijacker` (generated with the shared lib's key-gen helper — see [Shared lib](#shared-lib) below).
+- Encryption is ChaCha20-Poly1305 with a key shared out-of-band between `resolver_proxy` and `dns_hijacker`.
+  **Note:** you can generate the key using the command below:
+
+```bash
+./resolver_proxy gen-obfs-key
+# Result seem like: NeXA6IOiBtSewKagv9GRhB/PKOUae3svFVuY1Ok3DTE=
+```
+
 - The plaintext that gets encrypted is a 2-byte big-endian length prefix, the actual DNS query bytes, and then random padding out to a randomized total size — padding is _inside_ the AEAD envelope, not appended after it, so the ciphertext's own length doesn't leak the real query's length to an observer doing size-based traffic analysis.
 - `dns_hijacker` decrypts the datagram, reads the length prefix, keeps exactly that many bytes as the real query, and discards the rest as padding.
 - Every packet gets a fresh nonce and a randomized padding bucket, so there's no fixed packet size or repeating byte pattern for DPI to key on.
@@ -47,7 +54,7 @@ Use this when:
 
 Trade-off: a UDP blob to a non-standard port can itself look unusual on networks that whitelist known protocols rather than blocklist known-bad ones. If that's your situation, prefer `tls`.
 
-### 3. `tls`
+### 3. `tls(Not Implemented Yet)`
 
 Wraps the same encrypted payload described above inside an actual TLS connection to the target, so what crosses the network is a real TLS handshake followed by an encrypted stream — indistinguishable at the protocol level from any other HTTPS-like traffic to that IP or domain.
 
@@ -107,16 +114,6 @@ address = "127.0.0.1:53"
 strategy = "ordered"   # "ordered" (try in list order, fail over) or "round_robin"
 health_check_interval = 30   # seconds; unhealthy targets are skipped until they recover
 ```
-
-## Shared lib
-
-The AEAD framing (nonce generation, length-prefix encoding, padding, encrypt/decrypt) lives in the workspace's shared lib crate so `resolver_proxy` and `dns_hijacker` can't drift out of sync on wire format — both binaries link the same encode/decode functions. The shared lib also exposes the key-generation CLI helper used to produce `shared_key` values:
-
-```bash
-cargo run -p shared_lib --bin keygen
-```
-
-Copy the printed base64 key into the matching `[[targets]]` entry on the `resolver_proxy` side and the corresponding upstream listener entry on the `dns_hijacker` side — the key must match exactly on both ends for a given target/listener pair.
 
 ## How a query flows end to end
 
