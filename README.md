@@ -1,4 +1,4 @@
-# dns-hijacker
+# dns-relay
 
 This project is made of three components:
 
