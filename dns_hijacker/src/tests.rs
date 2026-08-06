@@ -568,7 +568,7 @@ async fn read_history(path: &std::path::Path) -> HashMap<String, Vec<String>> {
 #[tokio::test]
 async fn flush_writes_new_domain() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     history.push("x.com".into(), "1.1.1.1".into());
     history.close().await.unwrap();
@@ -580,13 +580,13 @@ async fn flush_writes_new_domain() {
 #[tokio::test]
 async fn appends_new_ip_after_existing_ones() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     history.push("x.com".into(), "1.1.1.1".into());
     history.close().await.unwrap();
 
     // second session against the same file
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
     history.push("x.com".into(), "8.9.9.9".into());
     history.close().await.unwrap();
 
@@ -600,7 +600,7 @@ async fn appends_new_ip_after_existing_ones() {
 #[tokio::test]
 async fn skips_exact_duplicate_of_last_ip() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     history.push("x.com".into(), "1.1.1.1".into());
     history.push("x.com".into(), "8.9.9.9".into());
@@ -619,7 +619,7 @@ async fn readds_ip_if_not_immediately_previous() {
     // Confirms current semantics: dedup only checks the LAST entry,
     // so 1.1.1.1 -> 8.9.9.9 -> 1.1.1.1 keeps all three.
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     history.push("x.com".into(), "1.1.1.1".into());
     history.push("x.com".into(), "8.9.9.9".into());
@@ -636,7 +636,7 @@ async fn readds_ip_if_not_immediately_previous() {
 #[tokio::test]
 async fn multiple_domains_are_independent() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     history.push("x.com".into(), "1.1.1.1".into());
     history.push("y.com".into(), "2.2.2.2".into());
@@ -650,7 +650,7 @@ async fn multiple_domains_are_independent() {
 #[tokio::test]
 async fn auto_flushes_once_capacity_is_reached() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     // push exactly CAPACITY unique entries to trigger the internal flush
     for i in 0..100 {
@@ -679,7 +679,7 @@ async fn auto_flushes_once_capacity_is_reached() {
 #[tokio::test]
 async fn concurrent_pushes_from_multiple_tasks_are_not_lost() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     let mut handles = Vec::new();
     for i in 0..20 {
@@ -706,7 +706,7 @@ async fn concurrent_pushes_from_multiple_tasks_are_not_lost() {
 #[tokio::test]
 async fn concurrent_pushes_to_same_domain_preserve_all_distinct_ips() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     let mut handles = Vec::new();
     for i in 0..10 {
@@ -736,7 +736,7 @@ async fn concurrent_pushes_to_same_domain_preserve_all_distinct_ips() {
 #[tokio::test]
 async fn close_flushes_remaining_buffered_entries() {
     let file = NamedTempFile::new().unwrap();
-    let history = Arc::new(HistoryBuffer::new(file.path()));
+    let history = Arc::new(HistoryBuffer::new(file.path(), None));
 
     // push fewer than CAPACITY so no auto-flush fires
     history.push("x.com".into(), "1.1.1.1".into());

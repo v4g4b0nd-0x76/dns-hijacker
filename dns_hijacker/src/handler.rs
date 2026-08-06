@@ -13,6 +13,7 @@ use std::{
 
 use crate::{
     cache::{ResponseCache, cache_key_from_query, cache_lookup, cache_store},
+    conf::RecordHisotryConf,
     dns::{
         craft_nxdomain_response, craft_redirect_response, parse_a_records, parse_domain, with_txid,
     },
@@ -28,7 +29,7 @@ use shared::{
     domain_trie::{DomainTrie, RuleMatch, check_rules},
 };
 use tokio::{io::AsyncWriteExt, net::UdpSocket, time::timeout};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, span::Record, warn};
 
 pub struct HandleQueryParams<'a> {
     pub payload: &'a [u8],
@@ -166,13 +167,22 @@ pub struct HistoryBuffer {
     path: PathBuf,
     queue: ArrayQueue<HistoryBufferEntry>,
     flushing: AtomicBool,
+    lines_count: usize,
+    matched_list: Vec<String>,
 }
 impl HistoryBuffer {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub fn new(path: impl Into<PathBuf>, conf: Option<RecordHisotryConf>) -> Self {
+        let (matched_list, lines_count) = if let Some(conf) = conf {
+            (conf.matched_list, conf.lines)
+        } else {
+            (Vec::new(), 100_000)
+        };
         Self {
             path: path.into(),
             queue: ArrayQueue::new(CAP),
             flushing: AtomicBool::new(false),
+            matched_list,
+            lines_count,
         }
     }
 
@@ -184,7 +194,20 @@ impl HistoryBuffer {
         if ips.is_empty() {
             return;
         }
-        let mut entry = (domain, ips);
+
+        let mut entry = if !self.matched_list.is_empty() {
+            if !self
+                .matched_list
+                .iter()
+                .any(|pattern| Self::domain_matches(pattern, &domain))
+            {
+                return;
+            }
+            (domain, ips)
+        } else {
+            (domain, ips)
+        };
+
         while let Err(rejected) = self.queue.push(entry) {
             entry = rejected;
             self.try_spawn_flush();
@@ -192,6 +215,18 @@ impl HistoryBuffer {
         }
         if self.queue.len() >= CAP {
             self.try_spawn_flush();
+        }
+    }
+
+    fn domain_matches(pattern: &str, domain: &str) -> bool {
+        match pattern.strip_prefix('*') {
+            Some(suffix) => {
+                domain == suffix
+                    || (domain.len() > suffix.len()
+                        && domain.ends_with(suffix)
+                        && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.')
+            }
+            None => domain == pattern,
         }
     }
     fn try_spawn_flush(self: &Arc<Self>) {
@@ -218,11 +253,9 @@ impl HistoryBuffer {
         if batch.is_empty() {
             return Ok(());
         }
-
         let mut history: HashMap<String, Vec<String>> = HashMap::new();
         let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
-
         if let Ok(content) = tokio::fs::read_to_string(&self.path).await {
             for line in content.lines() {
                 let mut parts = line.split_whitespace();
@@ -234,19 +267,25 @@ impl HistoryBuffer {
                 }
             }
         }
-
         for (domain, ips) in batch {
             let existing = history.entry(domain.clone()).or_insert_with(|| {
                 order.push(domain.clone());
                 Vec::new()
             });
             let seen_set = seen.entry(domain.clone()).or_default();
-
             for ip in ips {
                 // skip if this ip has ever been recorded for this domain before
                 if seen_set.insert(ip.clone()) {
                     existing.push(ip);
                 }
+            }
+        }
+
+        if order.len() > self.lines_count {
+            let excess = order.len() - self.lines_count;
+            for domain in order.drain(..excess) {
+                history.remove(&domain);
+                seen.remove(&domain);
             }
         }
 
@@ -259,7 +298,6 @@ impl HistoryBuffer {
             }
             out.push('\n');
         }
-
         let mut file = tokio::fs::File::create(&self.path).await?;
         file.write_all(out.as_bytes()).await?;
         file.flush().await?;

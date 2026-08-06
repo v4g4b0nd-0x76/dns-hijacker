@@ -32,8 +32,17 @@ pub struct Conf {
     #[serde(default = "default_false")]
     pub record_history: bool,
     #[serde(default)]
+    pub record_history_conf: Option<RecordHisotryConf>,
+    #[serde(default)]
     pub obfs_conf: ObfsConf,
 }
+
+#[derive(Default, Deserialize, Clone)]
+pub struct RecordHisotryConf {
+    pub matched_list: Vec<String>, // vector of patters to cover like *.google.com or ads.google.com
+    pub lines: usize,
+}
+
 fn default_dns_target() -> String {
     String::from("127.0.0.1:53")
 }

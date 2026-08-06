@@ -143,6 +143,7 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
         record_history,
         obfs_conf,
         dns_target,
+        record_history_conf,
     ) = {
         let conf_read = conf.read().unwrap();
         (
@@ -155,10 +156,14 @@ async fn run_server(conf_path: &PathBuf) -> Result<(), Error> {
             conf_read.record_history,
             conf_read.obfs_conf.clone(),
             conf_read.dns_target.clone(),
+            conf_read.record_history_conf.clone(),
         )
     };
     let history_buffer = if record_history {
-        Some(Arc::new(HistoryBuffer::new("history.txt")))
+        Some(Arc::new(HistoryBuffer::new(
+            "history.txt",
+            record_history_conf,
+        )))
     } else {
         None
     };
