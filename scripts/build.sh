@@ -8,7 +8,7 @@ BASE_RUSTFLAGS="${RUSTFLAGS:-} -C llvm-args=--inline-threshold=275 -C strip=symb
 export RUSTFLAGS="$BASE_RUSTFLAGS"
 
 cmd="${1:-auto}"
-bin="${2:-dns_hijacker}" # <-- which workspace binary to build; matches the
+bin="${2:-dns_relay}" # <-- which workspace binary to build; matches the
 #     name registered in that crate's Cargo.toml
 
 need_target() {

@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
-use dns_hijacker::{
+use dns_relay::{
     Error, ResolverPicker, ResponseCache,
     conf::watch_conf_and_reload,
     constants::BACKLOG_CAPACITY,
@@ -35,7 +35,7 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Parser)]
 #[command(
-    name = "dns-hijacker",
+    name = "dns-relay",
     version,
     about = "Block, Redirect or Resolve your DNS query as you want"
 )]

@@ -1,5 +1,5 @@
 [package]
-name = "dns_hijacker"
+name = "dns_relay"
 version.workspace = true
 edition = "2024"
 

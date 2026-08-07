@@ -189,7 +189,7 @@ impl TargetPicker {
 
 /// Tries each target in the picker's order until one responds, returning the
 /// first successful reply. The original DNS query bytes (including the
-/// OS-assigned transaction ID) are sent as-is — dns_hijacker preserves the
+/// OS-assigned transaction ID) are sent as-is — dns_relay preserves the
 /// transaction ID on its reply, so no rewriting is needed on the way back.
 async fn forward_query(
     picker: &TargetPicker,

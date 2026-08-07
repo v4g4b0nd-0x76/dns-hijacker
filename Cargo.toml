@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["dns_hijacker", "resolver_proxy", "shared"]
+members = ["dns_relay", "resolver_proxy", "shared"]
 
 [workspace.package]
 version = "1.6.1"

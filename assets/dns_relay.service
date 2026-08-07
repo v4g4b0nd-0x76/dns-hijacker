@@ -1,15 +1,15 @@
 [Unit]
 Description=DNS Hijacker local resolver
-Documentation=file:///opt/dns-hijacker/assets/SERVICES.md
+Documentation=file:///opt/dns-relay/assets/SERVICES.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=dns-hijacker
-Group=dns-hijacker
-WorkingDirectory=/opt/dns-hijacker
-ExecStart=/opt/dns-hijacker/dns-hijacker
+User=dns-relay
+Group=dns-relay
+WorkingDirectory=/opt/dns-relay
+ExecStart=/opt/dns-relay/dns-relay
 Restart=on-failure
 RestartSec=2
 # conf.toml is read from WorkingDirectory
@@ -34,8 +34,8 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=true
 SystemCallArchitectures=native
-ReadOnlyPaths=/opt/dns-hijacker
-ReadWritePaths=/opt/dns-hijacker/logs
+ReadOnlyPaths=/opt/dns-relay
+ReadWritePaths=/opt/dns-relay/logs
 # Allow reading config; no write needed at runtime.
 ProtectHostname=true
 

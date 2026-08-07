@@ -419,7 +419,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dns_hijacker"
+name = "dns_relay"
 version = "1.6.1"
 dependencies = [
  "aes-gcm",

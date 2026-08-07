@@ -1,4 +1,4 @@
-# Running dns-hijacker as a background service
+# Running dns-relay as a background service
 
 Install the release binary built with `./scripts/build.sh`, then use the unit below for your OS.
 
@@ -13,38 +13,38 @@ Required capability: `CAP_NET_BIND_SERVICE` (bind port 53 without full root).
 ./scripts/build.sh musl
 
 # 2) Install files
-sudo useradd --system --home /opt/dns-hijacker --shell /usr/sbin/nologin dns-hijacker || true
-sudo mkdir -p /opt/dns-hijacker
-sudo cp target/*/release/dns-hijacker /opt/dns-hijacker/dns-hijacker
-sudo mkdir /opt/dns-hijacker/logs 
+sudo useradd --system --home /opt/dns-relay --shell /usr/sbin/nologin dns-relay || true
+sudo mkdir -p /opt/dns-relay
+sudo cp target/*/release/dns-relay /opt/dns-relay/dns-relay
+sudo mkdir /opt/dns-relay/logs 
 # or native path:
-# sudo cp target/release/dns-hijacker /opt/dns-hijacker/dns-hijacker
-sudo cp conf.toml /opt/dns-hijacker/
-sudo cp assets/dns_hijacker.service /etc/systemd/system/dns-hijacker.service
-sudo chown -R dns-hijacker:dns-hijacker /opt/dns-hijacker
-sudo chmod 755 /opt/dns-hijacker/dns-hijacker
+# sudo cp target/release/dns-relay /opt/dns-relay/dns-relay
+sudo cp conf.toml /opt/dns-relay/
+sudo cp assets/dns_relay.service /etc/systemd/system/dns-relay.service
+sudo chown -R dns-relay:dns-relay /opt/dns-relay
+sudo chmod 755 /opt/dns-relay/dns-relay
 # 3) Allow the service user to reassert DNS via systemd-resolved without root.
 #    Required for netguard's VPN DNS-reassertion feature; skip this only if
 #    you don't need that (e.g. always-on VPN protection isn't a concern).
-sudo cp assets/49-dns-hijacker-resolved.rules /etc/polkit-1/rules.d/
+sudo cp assets/49-dns-relay-resolved.rules /etc/polkit-1/rules.d/
 
 
 # 3) Enable + start
 sudo systemctl daemon-reload
-sudo systemctl enable --now dns-hijacker.service
-sudo systemctl status dns-hijacker.service
+sudo systemctl enable --now dns-relay.service
+sudo systemctl status dns-relay.service
 ```
 
 Alternative without a dedicated user (capability on the binary):
 
 ```bash
-sudo setcap cap_net_bind_service=+ep /opt/dns-hijacker/dns-hijacker
+sudo setcap cap_net_bind_service=+ep /opt/dns-relay/dns-relay
 ```
 
 Logs:
 
 ```bash
-journalctl -u dns-hijacker -f
+journalctl -u dns-relay -f
 ```
 
 ## macOS Apple Silicon (M4) — launchd
@@ -53,22 +53,22 @@ Port 53 requires a root LaunchDaemon on macOS.
 
 ```bash
 ./scripts/build.sh mac
-sudo mkdir -p /opt/dns-hijacker
-sudo cp target/aarch64-apple-darwin/release/dns-hijacker /opt/dns-hijacker/
-sudo cp conf.toml /opt/dns-hijacker/
-sudo cp assets/com.dns-hijacker.plist /Library/LaunchDaemons/
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.dns-hijacker.plist
-sudo launchctl enable system/com.dns-hijacker
-sudo launchctl kickstart -k system/com.dns-hijacker
+sudo mkdir -p /opt/dns-relay
+sudo cp target/aarch64-apple-darwin/release/dns-relay /opt/dns-relay/
+sudo cp conf.toml /opt/dns-relay/
+sudo cp assets/com.dns-relay.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.dns-relay.plist
+sudo launchctl enable system/com.dns-relay
+sudo launchctl kickstart -k system/com.dns-relay
 ```
 
 Stop / unload:
 
 ```bash
-sudo launchctl bootout system/com.dns-hijacker
+sudo launchctl bootout system/com.dns-relay
 ```
 
-Logs: `/var/log/dns-hijacker.out.log` and `/var/log/dns-hijacker.err.log`.
+Logs: `/var/log/dns-relay.out.log` and `/var/log/dns-relay.err.log`.
 
 ## Point the OS at the local resolver
 

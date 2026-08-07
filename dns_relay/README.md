@@ -1,4 +1,4 @@
-# dns-hijacker
+# dns-relay
 
 A small DNS server, written in Rust, that lets you control how specific domains resolve. It's built for personal use — mainly redirecting or dropping domains, and resolving everything else through resolvers you trust — and is intentionally simple rather than a full-featured recursive resolver.
 
@@ -35,7 +35,7 @@ sudo setcap cap_net_bind_service=+ep PATH_TO_BINARY
 
 ## Running as a service
 
-There are systemd (Linux) and launchd (macOS) setup notes in `assets/SERVICES.md`, with unit files at `assets/dns_hijacker.service` and `assets/com.dns-hijacker.plist`.
+There are systemd (Linux) and launchd (macOS) setup notes in `assets/SERVICES.md`, with unit files at `assets/dns_relay.service` and `assets/com.dns-relay.plist`.
 
 ## Config format
 

@@ -3,7 +3,7 @@
 # Which workspace binary to operate on. Override per-invocation, e.g.:
 #   make build bin=resolver_proxy
 #   make run bin=resolver_proxy
-bin ?= dns_hijacker
+bin ?= dns_relay
 
 build:
 	@./scripts/build.sh auto $(bin)

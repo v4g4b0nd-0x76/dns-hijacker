@@ -29,7 +29,7 @@ use tokio::sync::Semaphore;
 #[command(
     name = "resolver-proxy",
     version,
-    about = "Connect to dns_hijacker server"
+    about = "Connect to dns_relay server"
 )]
 struct Cli {
     /// Path to config file

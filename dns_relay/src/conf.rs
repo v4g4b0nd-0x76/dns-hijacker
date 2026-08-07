@@ -54,7 +54,7 @@ pub struct ObfsConf {
     #[serde(default = "default_obfs_bind")]
     pub bind_addr: String,
     /// One or more base64 keys. Multiple keys let you run several
-    /// resolver_proxy deployments/clients against one dns_hijacker instance,
+    /// resolver_proxy deployments/clients against one dns_relay instance,
     /// each with its own key — the AEAD tag itself tells you which key (if
     /// any) a given packet was encrypted under.
     #[serde(default)]
