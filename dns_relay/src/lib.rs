@@ -1,4 +1,4 @@
-//! DNS hijacker library: config, resolver picker, packet helpers, and query handling.
+//! DNS Relay library: config, resolver picker, packet helpers, and query handling.
 use shared::*;
 pub mod conf;
 pub mod handler;

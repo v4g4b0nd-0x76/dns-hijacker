@@ -16,26 +16,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # dns_hijacker
-          - name: dns-hijacker-linux-gnu
+          # dns_relay
+          - name: dns-relay-linux-gnu
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build_arg: gnu
-            bin: dns_hijacker
-            asset: dns-hijacker-x86_64-unknown-linux-gnu
-          - name: dns-hijacker-linux-musl
+            bin: dns_relay
+            asset: dns-relay-x86_64-unknown-linux-gnu
+          - name: dns-relay-linux-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build_arg: musl
-            bin: dns_hijacker
-            asset: dns-hijacker-x86_64-unknown-linux-musl
+            bin: dns_relay
+            asset: dns-relay-x86_64-unknown-linux-musl
             musl: true
-          - name: dns-hijacker-macos-aarch64
+          - name: dns-relay-macos-aarch64
             os: macos-14
             target: aarch64-apple-darwin
             build_arg: mac
-            bin: dns_hijacker
-            asset: dns-hijacker-aarch64-apple-darwin
+            bin: dns_relay
+            asset: dns-relay-aarch64-apple-darwin
 
           # resolver_proxy
           - name: resolver-proxy-linux-gnu

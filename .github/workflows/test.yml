@@ -5,8 +5,8 @@ on:
 permissions:
   contents: read
 jobs:
-  test_dns_hijacker:
-    name: cargo test --bin dns_hijacker
+  test_dns_relay:
+    name: cargo test --bin dns_relay
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,9 +15,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-dns_hijacker
+          shared-key: test-dns_relay
       - name: Run tests
-        run: cargo test --bin dns_hijacker
+        run: cargo test --bin dns_relay
 
   test_resolver_proxy:
     name: cargo test --bin resolver_proxy
